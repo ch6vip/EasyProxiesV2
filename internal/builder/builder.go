@@ -701,8 +701,26 @@ func buildShadowsocksOptions(u *url.URL) (option.ShadowsocksOutboundOptions, err
 
 	query := u.Query()
 	if plugin := query.Get("plugin"); plugin != "" {
-		opts.Plugin = plugin
-		opts.PluginOptions = query.Get("plugin-opts")
+		// SIP003 plugin format: "name;args" (e.g. "simple-obfs;obfs=tls;obfs-host=...")
+		// or separate "plugin-opts" query parameter
+		pluginName := plugin
+		pluginArgs := ""
+		if idx := strings.Index(plugin, ";"); idx != -1 {
+			pluginName = plugin[:idx]
+			pluginArgs = plugin[idx+1:]
+		}
+		// Map common aliases to sing-box's registered plugin names
+		switch pluginName {
+		case "simple-obfs":
+			pluginName = "obfs-local"
+		}
+		opts.Plugin = pluginName
+		// Prefer explicit plugin-opts query parameter over inline args
+		if explicitOpts := query.Get("plugin-opts"); explicitOpts != "" {
+			opts.PluginOptions = explicitOpts
+		} else {
+			opts.PluginOptions = pluginArgs
+		}
 	}
 
 	return opts, nil
