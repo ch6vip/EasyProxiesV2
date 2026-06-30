@@ -20,7 +20,7 @@ RUN go env -w GOPROXY=${GOPROXY} && go mod download
 COPY . .
 # Copy frontend build output into the embed directory
 COPY --from=frontend /frontend-dist/ ./internal/monitor/assets/
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -tags "with_utls with_quic with_grpc with_wireguard with_gvisor" -o easy-proxies ./cmd/easy_proxies
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -tags "with_utls with_quic with_grpc with_wireguard with_gvisor with_simple_obfs" -o easy-proxies ./cmd/easy_proxies
 
 # ── Stage 3: Runtime ───────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
