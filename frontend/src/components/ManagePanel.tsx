@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import type { ConfigNodeConfig, ConfigNodePayload, NodeSnapshot, NodesResponse } from '../types'
+import type { ConfigNodeConfig, ConfigNodePayload, NodeSnapshot, NodesResponse, Subscription } from '../types'
 import {
   fetchConfigNodes, createConfigNode, updateConfigNode, deleteConfigNode,
   toggleConfigNode, batchToggleConfigNodes, batchDeleteConfigNodes, triggerReload,
   importNodes, exportProxies,
-  fetchNodes, probeNode, releaseNode,
+  fetchNodes, probeNode, releaseNode, listSubscriptions,
 } from '../api/client'
 
 // ---- Merged node type ----
@@ -130,6 +130,7 @@ const emptyPayload: ConfigNodePayload = {
 export default function ManagePanel() {
   const [configNodes, setConfigNodes] = useState<ConfigNodeConfig[]>([])
   const [monitorData, setMonitorData] = useState<NodesResponse | null>(null)
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -163,6 +164,7 @@ export default function ManagePanel() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('')
   const [regionFilter, setRegionFilter] = useState('')
   const [sourceFilter, setSourceFilter] = useState('')
+  const [subscriptionFilter, setSubscriptionFilter] = useState('all')
 
   // Sort
   const [sortKey, setSortKey] = useState<ManageSortKey>('name')
@@ -180,11 +182,13 @@ export default function ManagePanel() {
   const loadData = useCallback(async () => {
     try {
       setError('')
-      const [configRes, monitorRes] = await Promise.all([
+      const [configRes, monitorRes, subscriptionsRes] = await Promise.all([
         fetchConfigNodes(),
         fetchNodes().catch(() => null), // monitor data is optional
+        listSubscriptions(),
       ])
       setConfigNodes(configRes.nodes || [])
+      setSubscriptions(subscriptionsRes.subscriptions || [])
       if (monitorRes) setMonitorData(monitorRes)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载节点失败')
@@ -194,7 +198,8 @@ export default function ManagePanel() {
   }, [])
 
   useEffect(() => {
-    loadData()
+    const timer = setTimeout(() => void loadData(), 0)
+    return () => clearTimeout(timer)
   }, [loadData])
 
   useEffect(() => {
@@ -208,13 +213,15 @@ export default function ManagePanel() {
 
   const mergedNodes = useMemo((): MergedNode[] => {
     const snapshots = monitorData?.nodes || []
-    const snapMap = new Map<string, NodeSnapshot>()
+    const snapByURI = new Map<string, NodeSnapshot>()
+    const snapByName = new Map<string, NodeSnapshot>()
     for (const s of snapshots) {
-      snapMap.set(s.name, s)
+      if (s.uri) snapByURI.set(s.uri, s)
+      snapByName.set(s.name, s)
     }
 
     return configNodes.map((cfg): MergedNode => {
-      const snap = snapMap.get(cfg.name)
+      const snap = snapByURI.get(cfg.uri) || snapByName.get(cfg.name)
 
       if (cfg.disabled) {
         return {
@@ -301,13 +308,21 @@ export default function ManagePanel() {
       if (statusFilter && n.runtimeStatus !== statusFilter) return false
       if (regionFilter && n.region !== regionFilter) return false
       if (sourceFilter && n.source !== sourceFilter) return false
+      if (subscriptionFilter === 'none' && n.source === 'subscription') return false
+      if (subscriptionFilter !== 'all' && subscriptionFilter !== 'none' &&
+          !n.subscription_ids.includes(Number(subscriptionFilter))) return false
       return true
     })
-  }, [mergedNodes, filter, statusFilter, regionFilter, sourceFilter])
+  }, [mergedNodes, filter, statusFilter, regionFilter, sourceFilter, subscriptionFilter])
 
   const sortedNodes = useMemo(() => {
     return [...filteredNodes].sort((a, b) => compareManageNodes(a, b, sortKey, sortDir))
   }, [filteredNodes, sortKey, sortDir])
+
+  const visibleSelectedNames = useMemo(
+    () => sortedNodes.filter(node => selectedNodes.has(node.name)).map(node => node.name),
+    [selectedNodes, sortedNodes],
+  )
 
   // ---- Handlers ----
 
@@ -429,7 +444,7 @@ export default function ManagePanel() {
   }
 
   const toggleSelectAll = () => {
-    if (selectedNodes.size === sortedNodes.length) {
+    if (visibleSelectedNames.length === sortedNodes.length) {
       setSelectedNodes(new Set())
     } else {
       setSelectedNodes(new Set(sortedNodes.map(n => n.name)))
@@ -437,10 +452,10 @@ export default function ManagePanel() {
   }
 
   const handleBatchToggle = async (enabled: boolean) => {
-    if (selectedNodes.size === 0) return
+    if (visibleSelectedNames.length === 0) return
     setBatchProcessing(true)
     try {
-      const res = await batchToggleConfigNodes(Array.from(selectedNodes), enabled)
+      const res = await batchToggleConfigNodes(visibleSelectedNames, enabled)
       setSuccess(res.message || '批量操作完成')
       setSelectedNodes(new Set())
       await loadData()
@@ -490,11 +505,11 @@ export default function ManagePanel() {
   }
 
   const handleBatchDelete = async () => {
-    if (selectedNodes.size === 0) return
+    if (visibleSelectedNames.length === 0) return
     setBatchProcessing(true)
     setBatchDeleteConfirm(false)
     try {
-      const res = await batchDeleteConfigNodes(Array.from(selectedNodes))
+      const res = await batchDeleteConfigNodes(visibleSelectedNames)
       setSuccess(res.message || '批量删除完成')
       setSelectedNodes(new Set())
       await loadData()
@@ -688,6 +703,13 @@ export default function ManagePanel() {
           </div>
           
           <div className="flex flex-wrap sm:flex-nowrap gap-3 w-full lg:w-auto">
+            <select className="select select-md bg-base-200/50 focus:bg-base-100 flex-1 sm:w-40" value={subscriptionFilter} onChange={(e) => setSubscriptionFilter(e.target.value)}>
+              <option value="all">全部节点</option>
+              <option value="none">非订阅节点</option>
+              {subscriptions.filter(subscription => subscription.enabled).map(subscription => (
+                <option key={subscription.id} value={subscription.id}>{subscription.name}</option>
+              ))}
+            </select>
             <select className="select select-md bg-base-200/50 focus:bg-base-100 flex-1 sm:w-36" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}>
               <option value="">全部状态</option>
               <option value="normal">✅ 正常运行</option>
@@ -713,12 +735,12 @@ export default function ManagePanel() {
       </div>
 
       {/* Batch action bar */}
-      <div className={`transition-all duration-300 overflow-hidden ${selectedNodes.size > 0 ? 'max-h-24 opacity-100' : 'max-h-0 opacity-0'}`}>
+      <div className={`transition-all duration-300 overflow-hidden ${visibleSelectedNames.length > 0 ? 'max-h-24 opacity-100' : 'max-h-0 opacity-0'}`}>
         <div className="flex flex-col gap-3 px-5 py-4 bg-primary/5 border border-primary/20 rounded-2xl shadow-inner relative">
           <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-primary rounded-l-2xl"></div>
           <div className="flex items-center gap-4 flex-wrap">
             <span className="text-base font-medium text-base-content/80 flex items-center gap-2">
-              <span className="badge badge-primary badge-md font-bold">{selectedNodes.size}</span> 项已选择
+              <span className="badge badge-primary badge-md font-bold">{visibleSelectedNames.length}</span> 项已选择
             </span>
             <div className="flex gap-2 ml-auto flex-wrap">
               <button
@@ -783,10 +805,10 @@ export default function ManagePanel() {
                   <input
                     type="checkbox"
                     className="checkbox checkbox-xs"
-                    checked={sortedNodes.length > 0 && selectedNodes.size === sortedNodes.length}
+                    checked={sortedNodes.length > 0 && visibleSelectedNames.length === sortedNodes.length}
                     onChange={toggleSelectAll}
                     ref={(el) => {
-                      if (el) el.indeterminate = selectedNodes.size > 0 && selectedNodes.size < sortedNodes.length
+                      if (el) el.indeterminate = visibleSelectedNames.length > 0 && visibleSelectedNames.length < sortedNodes.length
                     }}
                   />
                 </th>
@@ -822,11 +844,11 @@ export default function ManagePanel() {
                         </svg>
                       </div>
                       <p className="text-base font-medium text-base-content">
-                        {filter || statusFilter || regionFilter || sourceFilter
+                        {filter || statusFilter || regionFilter || sourceFilter || subscriptionFilter !== 'all'
                           ? '未找到匹配的节点数据'
                           : '暂无配置节点'}
                       </p>
-                      {!(filter || statusFilter || regionFilter || sourceFilter) && (
+                      {!(filter || statusFilter || regionFilter || sourceFilter || subscriptionFilter !== 'all') && (
                         <p className="text-sm text-base-content/50 mt-1">请点击右上角「添加节点」或导入配置以开始</p>
                       )}
                     </div>
@@ -1097,12 +1119,12 @@ export default function ManagePanel() {
           <div className="modal-box max-w-sm">
             <h3 className="font-bold text-lg mb-2">确认批量删除</h3>
             <p className="text-base-content/70">
-              确定要删除选中的 <strong>{selectedNodes.size}</strong> 个节点吗？此操作不可撤销。
+              确定要删除选中的 <strong>{visibleSelectedNames.length}</strong> 个节点吗？此操作不可撤销。
             </p>
             <div className="modal-action">
               <button className="btn btn-ghost" onClick={() => setBatchDeleteConfirm(false)} disabled={batchProcessing}>取消</button>
               <button className="btn btn-error" onClick={handleBatchDelete} disabled={batchProcessing}>
-                {batchProcessing ? <span className="loading loading-spinner loading-xs"></span> : `删除 ${selectedNodes.size} 个节点`}
+                {batchProcessing ? <span className="loading loading-spinner loading-xs"></span> : `删除 ${visibleSelectedNames.length} 个节点`}
               </button>
             </div>
           </div>

@@ -1,6 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
-import type { SettingsData, SubscriptionStatus } from '../types'
-import { fetchSettings, updateSettings, triggerReload, fetchSubscriptionStatus, refreshSubscription } from '../api/client'
+import { useState, useEffect } from 'react'
+import type { SettingsData } from '../types'
+import {
+  fetchSettings,
+  triggerReload,
+  updateSettings,
+} from '../api/client'
+
+const settingResultLabels: Record<string, string> = {
+  runtime_config: '运行时配置',
+  management_server: '管理服务',
+  management_password: 'WebUI 密码',
+  management_probe_target: '探测目标',
+  management_health_check_interval: '健康检查间隔',
+  external_ip: '外部 IP',
+  sub_refresh_enabled: '订阅自动刷新',
+}
+
+const formatSettingResults = (items: string[]) =>
+  items.map(item => settingResultLabels[item] || item).join('、')
 
 const defaultSettings: SettingsData = {
   mode: 'pool',
@@ -52,33 +69,18 @@ export default function SettingsPanel() {
   const [saving, setSaving] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [error, setError] = useState('')
+  const [reloadWarning, setReloadWarning] = useState('')
   const [success, setSuccess] = useState('')
   const [needReload, setNeedReload] = useState(false)
+  const [needRestart, setNeedRestart] = useState(false)
+  const [applied, setApplied] = useState<string[]>([])
+  const [pending, setPending] = useState<string[]>([])
   const [isDirty, setIsDirty] = useState(false)
-
-  // Subscription status
-  const [subStatus, setSubStatus] = useState<SubscriptionStatus | null>(null)
-  const [subRefreshing, setSubRefreshing] = useState(false)
-
-  // New subscription input
-  const [newSubUrl, setNewSubUrl] = useState('')
-
-  const refreshSubStatus = useCallback(async () => {
-    try {
-      const subData = await fetchSubscriptionStatus()
-      if (subData) setSubStatus(subData)
-    } catch {
-      // ignore errors
-    }
-  }, [])
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [settingsData] = await Promise.all([
-          fetchSettings(),
-          refreshSubStatus(),
-        ])
+        const settingsData = await fetchSettings()
         const subscriptions = settingsData.subscriptions || []
         const merged = { ...defaultSettings, ...settingsData, subscriptions }
         setSettings(merged)
@@ -91,7 +93,7 @@ export default function SettingsPanel() {
       }
     }
     load()
-  }, [refreshSubStatus])
+  }, [])
 
   useEffect(() => {
     if (success) {
@@ -103,15 +105,21 @@ export default function SettingsPanel() {
   const handleSave = async () => {
     setSaving(true)
     setError('')
+    setReloadWarning('')
     setSuccess('')
     try {
-      const res = await updateSettings(settings)
-      setSuccess(res.message || '设置已保存')
-      setSavedSettings({ ...settings })
+      // Subscription CRUD is persisted separately; preserve the last value read
+      // from /api/settings so this form cannot overwrite it with UI state.
+      const payload = { ...settings, subscriptions: savedSettings.subscriptions }
+      const res = await updateSettings(payload)
+      setSuccess(res.reloaded ? '设置已保存并自动重载' : (res.message || '设置已保存'))
+      setReloadWarning(res.reload_error ? `设置已保存，但自动重载失败：${res.reload_error}` : '')
+      setSavedSettings(payload)
       setIsDirty(false)
-      if (res.need_reload) setNeedReload(true)
-      // Refresh subscription status after saving (config may have changed)
-      await refreshSubStatus()
+      setNeedReload(Boolean(res.need_reload))
+      setNeedRestart(Boolean(res.need_restart))
+      setApplied(res.applied)
+      setPending(res.pending)
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败')
     } finally {
@@ -122,54 +130,17 @@ export default function SettingsPanel() {
   const handleReload = async () => {
     setReloading(true)
     setError('')
+    setReloadWarning('')
     try {
       const res = await triggerReload()
       setSuccess(res.message || '重载成功')
       setNeedReload(false)
-      // Refresh subscription status after reload (subscription manager config updated)
-      await refreshSubStatus()
+      setPending(items => items.filter(item => item !== 'runtime_config'))
     } catch (err) {
       setError(err instanceof Error ? err.message : '重载失败')
     } finally {
       setReloading(false)
     }
-  }
-
-  const handleSubRefresh = async () => {
-    setSubRefreshing(true)
-    setError('')
-    try {
-      const res = await refreshSubscription()
-      setSuccess(`订阅刷新成功，共 ${res.node_count} 个节点`)
-      await refreshSubStatus()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '刷新订阅失败')
-    } finally {
-      setSubRefreshing(false)
-    }
-  }
-
-  const addSubscription = () => {
-    const url = newSubUrl.trim()
-    if (!url) return
-    if (settings.subscriptions.includes(url)) {
-      setError('该订阅地址已存在')
-      return
-    }
-    setSettings(s => {
-      const updated = { ...s, subscriptions: [...s.subscriptions, url] }
-      setIsDirty(JSON.stringify(updated) !== JSON.stringify(savedSettings))
-      return updated
-    })
-    setNewSubUrl('')
-  }
-
-  const removeSubscription = (index: number) => {
-    setSettings(s => {
-      const updated = { ...s, subscriptions: s.subscriptions.filter((_, i) => i !== index) }
-      setIsDirty(JSON.stringify(updated) !== JSON.stringify(savedSettings))
-      return updated
-    })
   }
 
   const updateField = <K extends keyof SettingsData>(key: K, value: SettingsData[K]) => {
@@ -270,16 +241,36 @@ export default function SettingsPanel() {
           <span>{success}</span>
         </div>
       )}
+      {reloadWarning && (
+        <div role="alert" className="alert alert-warning alert-soft text-sm">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+          <span>{reloadWarning}</span>
+        </div>
+      )}
+      {needRestart && (
+        <div role="alert" className="alert alert-warning alert-soft text-sm">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+          <span>管理服务启停或监听地址需重启进程。</span>
+        </div>
+      )}
       {needReload && (
         <div role="alert" className="alert alert-warning alert-soft text-sm">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
           </svg>
           <div>
-            <span>配置已保存。</span>
-            <span className="font-medium">WebUI 密码、探测目标、外部 IP、SSL 验证</span>
-            <span>已立即生效；其他配置（运行模式、监听端口、代理池等）需要点击「重载配置」才能生效。</span>
+            <span>配置已保存，部分运行时配置尚未生效，请点击「重载配置」。</span>
           </div>
+        </div>
+      )}
+      {(applied.length > 0 || pending.length > 0) && (
+        <div className="text-xs text-base-content/60 px-1 space-y-1">
+          {applied.length > 0 && <p>已应用：{formatSettingResults(applied)}</p>}
+          {pending.length > 0 && <p>待生效：{formatSettingResults(pending)}</p>}
         </div>
       )}
 
@@ -780,126 +771,6 @@ export default function SettingsPanel() {
           )}
         </div>
 
-        {/* ===== 订阅管理 (full width) ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md lg:col-span-2">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-base-200 pb-4 mb-2">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-error/10 flex items-center justify-center text-error shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="font-bold text-lg text-base-content">订阅链接管理</h3>
-                <p className="text-xs text-base-content/50 font-medium">配置节点获取来源</p>
-              </div>
-            </div>
-
-            {/* Show refresh button when subscriptions exist (saved or in current settings) */}
-            {(subStatus?.has_subscriptions || settings.subscriptions.length > 0) && (
-              <div className="flex items-center gap-3 bg-base-200/50 px-3 py-1.5 rounded-lg border border-base-300/50">
-                {subStatus && subStatus.node_count != null && subStatus.node_count > 0 && (
-                  <span className="text-sm font-medium text-base-content/70">
-                    节点: <strong className="text-base-content">{subStatus.node_count}</strong>
-                  </span>
-                )}
-                {subStatus?.enabled && (
-                  <span className="badge badge-success badge-sm border-none bg-success/20 text-success font-semibold">自动刷新</span>
-                )}
-                <div className="w-px h-4 bg-base-300 mx-1"></div>
-                <button
-                  className="btn btn-sm btn-ghost hover:bg-primary/10 hover:text-primary gap-1.5 px-2"
-                  onClick={handleSubRefresh}
-                  disabled={subRefreshing || subStatus?.is_refreshing || isDirty}
-                  title={isDirty ? '请先保存设置并重载配置' : '立即刷新订阅'}
-                >
-                  {subRefreshing || subStatus?.is_refreshing ? (
-                    <span className="loading loading-spinner loading-xs"></span>
-                  ) : (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      立即刷新
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-          </div>
-
-          {subStatus?.last_error && (
-            <div role="alert" className="alert alert-error alert-soft text-sm py-3 animate-in fade-in">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>{subStatus.last_error}</span>
-            </div>
-          )}
-
-          {/* Add subscription */}
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-base-content/40">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                </svg>
-              </div>
-              <input
-                type="text"
-                className="input input-md w-full pl-10 font-mono text-sm bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
-                placeholder="https://example.com/subscribe?token=xxx"
-                value={newSubUrl}
-                onChange={(e) => setNewSubUrl(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && addSubscription()}
-              />
-            </div>
-            <button
-              className="btn btn-md btn-primary shadow-sm"
-              onClick={addSubscription}
-              disabled={!newSubUrl.trim()}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-              </svg>
-              添加
-            </button>
-          </div>
-
-          {/* Subscription list */}
-          {settings.subscriptions.length > 0 ? (
-            <div className="space-y-3 mt-4">
-              {settings.subscriptions.map((url, index) => (
-                <div key={index} className="flex items-center gap-3 p-3 lg:p-4 rounded-xl border border-base-200 bg-base-200/30 hover:bg-base-200/60 transition-colors group">
-                  <div className="flex-1 min-w-0">
-                    <code className="text-sm font-mono text-base-content/80 break-all">{url}</code>
-                  </div>
-                  <button
-                    className="btn btn-sm btn-square btn-ghost text-base-content/40 hover:text-error hover:bg-error/10 shrink-0 opacity-0 group-hover:opacity-100 transition-all"
-                    onClick={() => removeSubscription(index)}
-                    title="删除订阅"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center py-10 px-4 text-center rounded-xl border border-dashed border-base-300 bg-base-200/20">
-              <div className="w-12 h-12 rounded-full bg-base-200 flex items-center justify-center text-base-content/30 mb-3">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                </svg>
-              </div>
-              <p className="text-base font-medium text-base-content/60">暂无订阅链接</p>
-              <p className="text-sm text-base-content/40 mt-1">在上方输入框添加您的节点订阅地址</p>
-            </div>
-          )}
-          
-          <p className="text-xs text-base-content/40 text-center mt-4">⚠️ 添加或删除订阅后，需点击顶部「保存设置」并「重载配置」才能生效</p>
-        </div>
       </div>
 
       </div>
