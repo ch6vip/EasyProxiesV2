@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchDebug, streamDebugLogs } from '../api/client'
 import type { DebugLogEvent, DebugNode, TimelineEvent } from '../types'
+import { controlClass, PageContent, PageHeader, PageLayout } from './ui/PageLayout'
 
 interface LogEntry {
   nodeTag: string
@@ -80,32 +81,25 @@ export default function DebugPanel() {
   const visibleLogs = selectedNode === 'all' ? logs : logs.filter((log) => log.nodeTag === selectedNode)
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] min-h-0 flex-col animate-in fade-in duration-500">
-      <header className="shrink-0 border-b border-base-300/60 bg-base-100/80 px-4 py-4 shadow-sm backdrop-blur-xl lg:px-8">
-        <div className="mx-auto flex w-full max-w-[1600px] flex-col justify-between gap-4 md:flex-row md:items-center">
-          <div>
-            <h2 className="flex items-center gap-3 text-2xl font-bold">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /></svg>
-              </span>
-              调试面板
-            </h2>
-            <p className="ml-[3.25rem] mt-1.5 text-sm text-base-content/50">实时查看所有节点的运行日志</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <select className="select select-sm min-w-44" value={selectedNode} onChange={(event) => setSelectedNode(event.target.value)} aria-label="筛选日志节点">
+    <PageLayout fill>
+      <PageHeader
+        sticky={false}
+        title="调试面板"
+        description="实时查看所有节点的运行日志"
+        icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /></svg>}
+        actions={<>
+            <select className={`select select-sm w-28 sm:w-44 lg:select-md ${controlClass}`} value={selectedNode} onChange={(event) => setSelectedNode(event.target.value)} aria-label="筛选日志节点">
               <option value="all">全部节点 ({nodes.length})</option>
               {nodes.map((node) => <option key={node.tag} value={node.tag}>{node.name || node.tag}</option>)}
             </select>
-            <button className="btn btn-primary btn-sm gap-2" onClick={() => void loadHistory()} disabled={loading}>
+            <button className="btn btn-primary btn-sm gap-2 lg:btn-md" onClick={() => void loadHistory()} disabled={loading} title="刷新历史日志" aria-label="刷新历史日志">
               {loading ? <span className="loading loading-spinner loading-xs" /> : <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.5 15a7 7 0 0012 2M18.5 9a7 7 0 00-12-2" /></svg>}
-              刷新历史
+              <span className="hidden sm:inline">刷新历史</span>
             </button>
-          </div>
-        </div>
-      </header>
+          </>}
+      />
 
-      <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col p-4 lg:p-8">
+      <PageContent fill>
         {error && <div role="alert" className="alert alert-error alert-soft mb-4 text-sm"><span>{error}</span></div>}
         <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-700 bg-[#10141c] shadow-xl">
           <div className="flex items-center justify-between border-b border-slate-700/80 bg-[#171c26] px-4 py-3 text-xs text-slate-400">
@@ -127,7 +121,7 @@ export default function DebugPanel() {
             <span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'animate-pulse bg-emerald-400' : 'bg-amber-400'}`} />{connected ? '实时流已连接' : '实时流重连中'}</span>
           </div>
         </section>
-      </main>
-    </div>
+      </PageContent>
+    </PageLayout>
   )
 }

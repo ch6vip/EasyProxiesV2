@@ -6,6 +6,7 @@ import {
   importNodes, exportProxies,
   fetchNodes, probeNode, releaseNode, listSubscriptions,
 } from '../api/client'
+import { PageContent, PageHeader, PageLayout } from './ui/PageLayout'
 
 // ---- Merged node type ----
 interface MergedNode extends ConfigNodeConfig {
@@ -619,35 +620,24 @@ export default function ManagePanel() {
   const thClass = "font-semibold cursor-pointer select-none hover:text-primary transition-colors"
 
   return (
-    <div className="flex flex-col min-h-full animate-in fade-in duration-500">
-      {/* Header */}
-      <div className="sticky top-0 z-30 bg-base-100/80 backdrop-blur-xl px-4 lg:px-8 py-4 border-b border-base-300/60 shadow-sm">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 max-w-[1600px] mx-auto w-full">
-          <div>
-            <h2 className="text-2xl font-bold flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0 border border-primary/20">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                </svg>
-              </div>
-              节点管理
-            </h2>
-            <div className="text-sm font-medium text-base-content/50 mt-1.5 ml-[3.25rem] flex items-center gap-2">
+    <PageLayout>
+      <PageHeader
+        title="节点管理"
+        description={<div className="flex flex-wrap items-center gap-2 font-medium">
               <span>共 <strong className="text-base-content/80">{mergedNodes.length}</strong> 个节点</span>
               {normalCount > 0 && <span className="badge badge-success badge-xs border-none bg-success/15 text-success">正常 {normalCount}</span>}
               {blacklistedCount > 0 && <span className="badge badge-error badge-xs border-none bg-error/15 text-error">黑名单 {blacklistedCount}</span>}
               {disabledCount > 0 && <span className="badge badge-ghost badge-xs bg-base-200 text-base-content/50">禁用 {disabledCount}</span>}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button className="btn btn-sm lg:btn-md btn-primary shadow-sm gap-2" onClick={openCreateModal}>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" /></svg>
-              添加节点
-            </button>
+            </div>}
+        icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                </svg>}
+        actions={<>
             <div className="dropdown dropdown-end">
-              <div tabIndex={0} role="button" className="btn btn-ghost border border-base-300 btn-sm lg:btn-md gap-2 shadow-sm">
-                管理操作
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
+              <div tabIndex={0} role="button" className="btn btn-ghost btn-sm gap-2 border border-base-300 shadow-sm lg:btn-md" title="管理操作" aria-label="管理操作">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+                <span className="hidden sm:inline">管理操作</span>
+                <svg xmlns="http://www.w3.org/2000/svg" className="hidden h-4 w-4 opacity-50 sm:block" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
               </div>
               <ul tabIndex={0} className="dropdown-content menu bg-base-100 border border-base-200 rounded-xl z-20 w-48 p-2 shadow-xl mt-2">
                 <li><a onClick={openImportModal} className="hover:bg-primary/10 hover:text-primary gap-3"><svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> 导入节点配置</a></li>
@@ -655,16 +645,19 @@ export default function ManagePanel() {
               </ul>
             </div>
             {needReload && (
-              <button className="btn btn-warning btn-sm lg:btn-md shadow-sm gap-2 animate-pulse" onClick={handleReload}>
+              <button className="btn btn-warning btn-sm gap-2 shadow-sm animate-pulse lg:btn-md" onClick={handleReload} title="重载配置" aria-label="重载配置">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                重载生效
+                <span className="hidden sm:inline">重载生效</span>
               </button>
             )}
-          </div>
-        </div>
-      </div>
+            <button className="btn btn-primary btn-sm gap-2 shadow-sm lg:btn-md" onClick={openCreateModal} title="添加节点" aria-label="添加节点">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" /></svg>
+              <span className="hidden sm:inline">添加节点</span>
+            </button>
+          </>}
+      />
 
-      <div className="p-4 lg:p-8 space-y-6 flex-1 max-w-[1600px] mx-auto w-full">
+      <PageContent>
         {/* Alerts */}
         {error && (
         <div role="alert" className="alert alert-error alert-soft text-sm">
@@ -687,7 +680,7 @@ export default function ManagePanel() {
       )}
 
       {/* Filters Area */}
-      <div className="bg-base-100 border border-base-300/50 rounded-2xl p-4 shadow-sm">
+      <div className="panel-card p-4 lg:p-5">
         <div className="flex flex-col lg:flex-row gap-4 items-center">
           <div className="relative flex-1 w-full">
             <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-base-content/40">
@@ -735,7 +728,7 @@ export default function ManagePanel() {
       </div>
 
       {/* Batch action bar */}
-      <div className={`transition-all duration-300 overflow-hidden ${visibleSelectedNames.length > 0 ? 'max-h-24 opacity-100' : 'max-h-0 opacity-0'}`}>
+      <div className={`overflow-hidden transition-all duration-300 ${visibleSelectedNames.length > 0 ? 'max-h-48 opacity-100 sm:max-h-24' : 'max-h-0 opacity-0'}`}>
         <div className="flex flex-col gap-3 px-5 py-4 bg-primary/5 border border-primary/20 rounded-2xl shadow-inner relative">
           <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-primary rounded-l-2xl"></div>
           <div className="flex items-center gap-4 flex-wrap">
@@ -796,7 +789,7 @@ export default function ManagePanel() {
       </div>
 
       {/* Node Table */}
-      <div className="rounded-2xl border border-base-300/50 bg-base-100 shadow-sm overflow-hidden">
+      <div className="panel-card overflow-hidden">
         <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-280px)] min-h-[400px]">
           <table className="table table-md table-pin-rows">
             <thead>
@@ -1002,7 +995,7 @@ export default function ManagePanel() {
                   min={0} max={65535}
                 />
               </fieldset>
-              <div className="grid grid-cols-2 gap-3 mb-4">
+              <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <fieldset className="fieldset">
                   <legend className="fieldset-legend">用户名</legend>
                   <input
@@ -1133,7 +1126,7 @@ export default function ManagePanel() {
           </form>
         </div>
       )}
-    </div>
-    </div>
+    </PageContent>
+    </PageLayout>
   )
 }

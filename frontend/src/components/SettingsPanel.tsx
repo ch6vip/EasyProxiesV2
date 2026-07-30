@@ -5,6 +5,7 @@ import {
   triggerReload,
   updateSettings,
 } from '../api/client'
+import { PageContent, PageHeader, PageLayout } from './ui/PageLayout'
 
 const settingResultLabels: Record<string, string> = {
   runtime_config: '运行时配置',
@@ -172,58 +173,51 @@ export default function SettingsPanel() {
   }
 
   return (
-    <div className="flex flex-col min-h-full animate-in fade-in duration-500">
-      {/* Header - sticky */}
-      <div className="sticky top-0 z-30 bg-base-100/80 backdrop-blur-xl px-4 lg:px-8 py-4 border-b border-base-300/60 shadow-sm">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 max-w-[1200px] mx-auto w-full">
-          <div>
-            <h2 className="text-2xl font-bold flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0 border border-primary/20">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-              </div>
-              系统设置
-            </h2>
-            <p className="text-sm text-base-content/50 mt-1.5 ml-[3.25rem]">管理系统所有配置项，修改后需保存生效</p>
-          </div>
-          <div className="flex gap-2">
+    <PageLayout>
+      <PageHeader
+        title="系统设置"
+        description="管理系统所有配置项，修改后需保存生效"
+        icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>}
+        actions={<>
+            {needReload && (
+              <button
+                className="btn btn-warning btn-sm gap-2 shadow-sm animate-pulse lg:btn-md"
+                onClick={handleReload}
+                disabled={reloading}
+                title="重载配置"
+                aria-label="重载配置"
+              >
+                {reloading ? <span className="loading loading-spinner loading-sm"></span> : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                )}
+                <span className="hidden sm:inline">重载配置</span>
+              </button>
+            )}
             <button
               className={`btn btn-sm lg:btn-md gap-2 shadow-sm ${isDirty ? 'btn-primary' : 'btn-ghost border border-base-300'}`}
               onClick={handleSave}
               disabled={saving || !isDirty}
+              title={isDirty ? '保存设置' : '设置已保存'}
+              aria-label={isDirty ? '保存设置' : '设置已保存'}
             >
               {saving ? <span className="loading loading-spinner loading-sm"></span> : isDirty ? (
                 <>
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
                   </svg>
-                  保存设置
+                  <span className="hidden sm:inline">保存设置</span>
                 </>
-              ) : '✅ 已保存'}
+              ) : <><svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" /></svg><span className="hidden sm:inline">已保存</span></>}
             </button>
-            {needReload && (
-              <button
-                className="btn btn-warning btn-sm lg:btn-md gap-2 shadow-sm animate-pulse"
-                onClick={handleReload}
-                disabled={reloading}
-              >
-                {reloading ? <span className="loading loading-spinner loading-sm"></span> : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    重载配置
-                  </>
-                )}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+          </>}
+      />
 
-      <div className="p-4 lg:p-8 space-y-6 max-w-[1200px] mx-auto w-full pb-10 flex-1">
+      <PageContent>
         {/* Alerts */}
         {error && (
         <div role="alert" className="alert alert-error alert-soft text-sm">
@@ -275,10 +269,10 @@ export default function SettingsPanel() {
       )}
 
       {/* Settings Cards Grid */}
-      <div className="grid gap-5 lg:grid-cols-2">
+      <div className="grid items-start gap-5 lg:grid-cols-2 2xl:grid-cols-3">
 
         {/* ===== 全局设置 ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-info/10 flex items-center justify-center text-info shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -346,7 +340,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== 监听配置 (Pool 入口) ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center text-success shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -359,7 +353,7 @@ export default function SettingsPanel() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <fieldset className="fieldset">
               <legend className="fieldset-legend font-semibold text-base-content/80">监听地址</legend>
               <input
@@ -396,7 +390,7 @@ export default function SettingsPanel() {
             <p className="label text-base-content/50 mt-1">mixed 表示同端口同时支持 HTTP 与 SOCKS5</p>
           </fieldset>
 
-          <div className="grid grid-cols-2 gap-4 pt-2">
+          <div className="grid grid-cols-1 gap-4 pt-2 sm:grid-cols-2">
             <fieldset className="fieldset">
               <legend className="fieldset-legend font-semibold text-base-content/80">代理用户名</legend>
               <input
@@ -421,7 +415,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== 多端口配置 ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-secondary/10 flex items-center justify-center text-secondary shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -434,7 +428,7 @@ export default function SettingsPanel() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <fieldset className="fieldset">
               <legend className="fieldset-legend font-semibold text-base-content/80">监听地址</legend>
               <input
@@ -471,7 +465,7 @@ export default function SettingsPanel() {
             <p className="label text-base-content/50 mt-1">应用于 multi-port / hybrid 的每个节点入口</p>
           </fieldset>
 
-          <div className="grid grid-cols-2 gap-4 pt-2">
+          <div className="grid grid-cols-1 gap-4 pt-2 sm:grid-cols-2">
             <fieldset className="fieldset">
               <legend className="fieldset-legend font-semibold text-base-content/80">默认用户名</legend>
               <input
@@ -496,7 +490,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== 代理池配置 ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -548,7 +542,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== 管理面板 ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -620,7 +614,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== GeoIP ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-info/10 flex items-center justify-center text-info shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -685,7 +679,7 @@ export default function SettingsPanel() {
         </div>
 
         {/* ===== 订阅刷新 ===== */}
-        <div className="rounded-2xl border border-base-300/50 bg-base-100 p-6 lg:p-8 space-y-5 shadow-sm transition-shadow hover:shadow-md">
+        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-warning/10 flex items-center justify-center text-warning shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -710,7 +704,7 @@ export default function SettingsPanel() {
 
           {settings.sub_refresh_enabled && (
             <div className="space-y-4 pt-2 animate-in fade-in slide-in-from-top-2">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <fieldset className="fieldset">
                   <legend className="fieldset-legend font-semibold text-base-content/80">刷新间隔</legend>
                   <input
@@ -733,7 +727,7 @@ export default function SettingsPanel() {
                 </fieldset>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <fieldset className="fieldset">
                   <legend className="fieldset-legend font-semibold text-base-content/80">健康检查超时</legend>
                   <input
@@ -773,8 +767,8 @@ export default function SettingsPanel() {
 
       </div>
 
-      </div>
+      </PageContent>
 
-    </div>
+    </PageLayout>
   )
 }

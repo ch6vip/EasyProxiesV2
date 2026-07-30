@@ -11,6 +11,7 @@ import {
   toggleSubscription,
   updateSubscription,
 } from '../api/client'
+import { controlClass, PageContent, PageHeader, PageLayout, surfaceClass } from './ui/PageLayout'
 
 export default function SubscriptionsPanel() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
@@ -102,44 +103,45 @@ export default function SubscriptionsPanel() {
   if (loading) return <div className="flex h-64 items-center justify-center"><span className="loading loading-spinner loading-lg text-primary" /></div>
 
   return (
-    <div className="min-h-full animate-in fade-in duration-500">
-      <div className="border-b border-base-300/60 bg-base-100/80 px-4 py-5 backdrop-blur-xl lg:px-8">
-        <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-2xl font-bold">订阅管理</h2>
-            <p className="mt-1 text-sm text-base-content/50">集中管理订阅源、同步状态与运行时节点</p>
-          </div>
-          <button className="btn btn-primary gap-2" disabled={busy || subscriptions.length === 0} onClick={() => void runAction('refresh-all', refreshSubscription, '全部订阅刷新完成')}>
+    <PageLayout>
+      <PageHeader
+        title="订阅管理"
+        description="集中管理订阅源、同步状态与运行时节点"
+        icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>}
+        actions={<button className="btn btn-primary btn-sm gap-2 shadow-sm lg:btn-md" disabled={busy || subscriptions.length === 0} onClick={() => void runAction('refresh-all', refreshSubscription, '全部订阅刷新完成')} title="刷新全部订阅" aria-label="刷新全部订阅">
             {action === 'refresh-all' || status?.is_refreshing ? <span className="loading loading-spinner loading-sm" /> : null}
-            全量刷新
-          </button>
-        </div>
-      </div>
+            {action !== 'refresh-all' && !status?.is_refreshing && <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 sm:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.5 15a7 7 0 0012 2M18.5 9a7 7 0 00-12-2" /></svg>}
+            <span className="hidden sm:inline">全量刷新</span>
+          </button>}
+      />
 
-      <div className="mx-auto w-full max-w-[1200px] space-y-6 p-4 pb-10 lg:p-8">
+      <PageContent>
         {error && <div role="alert" className="alert alert-error alert-soft"><span>{error}</span></div>}
         {success && <div role="alert" className="alert alert-success alert-soft"><span>{success}</span></div>}
         {status?.last_error && <div role="alert" className="alert alert-warning alert-soft"><span>最近同步错误：{status.last_error}</span></div>}
 
-        <div className="stats stats-vertical w-full border border-base-300/60 bg-base-100 shadow-sm sm:stats-horizontal">
-          <div className="stat"><div className="stat-title">订阅总数</div><div className="stat-value text-primary">{subscriptions.length}</div></div>
-          <div className="stat"><div className="stat-title">已启用</div><div className="stat-value text-success">{enabledCount}</div></div>
-          <div className="stat"><div className="stat-title">节点总数</div><div className="stat-value">{status?.node_count ?? nodeCount}</div></div>
-          <div className="stat"><div className="stat-title">异常订阅</div><div className={`stat-value ${errorCount ? 'text-error' : 'text-base-content'}`}>{errorCount}</div></div>
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <div className={`${surfaceClass} p-5`}><div className="text-sm font-medium text-base-content/55">订阅总数</div><div className="mt-2 text-3xl font-black tabular-nums text-primary">{subscriptions.length}</div><div className="mt-2 text-xs text-base-content/40">已配置的订阅源</div></div>
+          <div className={`${surfaceClass} p-5`}><div className="text-sm font-medium text-base-content/55">已启用</div><div className="mt-2 text-3xl font-black tabular-nums text-success">{enabledCount}</div><div className="mt-2 text-xs text-base-content/40">参与运行时同步</div></div>
+          <div className={`${surfaceClass} p-5`}><div className="text-sm font-medium text-base-content/55">节点总数</div><div className="mt-2 text-3xl font-black tabular-nums">{status?.node_count ?? nodeCount}</div><div className="mt-2 text-xs text-base-content/40">订阅提供的节点</div></div>
+          <div className={`${surfaceClass} p-5`}><div className="text-sm font-medium text-base-content/55">异常订阅</div><div className={`mt-2 text-3xl font-black tabular-nums ${errorCount ? 'text-error' : 'text-base-content'}`}>{errorCount}</div><div className="mt-2 text-xs text-base-content/40">最近同步状态</div></div>
         </div>
 
-        <section className="rounded-2xl border border-base-300/50 bg-base-100 p-5 shadow-sm lg:p-8">
+        <section className={`${surfaceClass} p-5 lg:p-6`}>
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-base-200 pb-4">
-            <div><h3 className="text-lg font-bold">订阅源</h3><p className="text-xs text-base-content/50">变更会立即同步到运行时</p></div>
+            <div><h3 className="text-lg font-bold">添加订阅源</h3><p className="mt-0.5 text-xs text-base-content/50">填写名称和订阅地址，添加后会立即同步</p></div>
             <span className={`badge ${status?.enabled ? 'badge-success' : 'badge-ghost'}`}>{status?.enabled ? '自动刷新已开启' : '自动刷新未开启'}</span>
           </div>
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto]">
-            <input className="input w-full bg-base-200/50" placeholder="订阅名称" value={newName} onChange={(event) => setNewName(event.target.value)} />
-            <input type="url" className="input w-full bg-base-200/50 font-mono text-sm" placeholder="https://example.com/subscribe" value={newUrl} onChange={(event) => setNewUrl(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void addSubscription()} />
-            <button className="btn btn-primary" disabled={!newName.trim() || !newUrl.trim() || busy} onClick={() => void addSubscription()}>{action === 'create' && <span className="loading loading-spinner loading-sm" />}添加</button>
+          <div className="grid items-end gap-4 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto]">
+            <fieldset className="fieldset"><legend className="fieldset-legend font-semibold text-base-content/80">订阅名称</legend><input className={`input input-md w-full ${controlClass}`} placeholder="例如：主力节点" value={newName} onChange={(event) => setNewName(event.target.value)} /></fieldset>
+            <fieldset className="fieldset"><legend className="fieldset-legend font-semibold text-base-content/80">订阅地址</legend><input type="url" className={`input input-md w-full font-mono text-sm ${controlClass}`} placeholder="https://example.com/subscribe" value={newUrl} onChange={(event) => setNewUrl(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void addSubscription()} /></fieldset>
+            <button className="btn btn-primary btn-md lg:min-w-28" disabled={!newName.trim() || !newUrl.trim() || busy} onClick={() => void addSubscription()}>{action === 'create' && <span className="loading loading-spinner loading-sm" />}添加订阅</button>
           </div>
+        </section>
 
-          {subscriptions.length ? <div className="mt-5 space-y-3">{subscriptions.map((subscription) => (
+        <section className={`${surfaceClass} overflow-hidden`}>
+          <div className="flex items-center justify-between border-b border-base-200 px-5 py-4 lg:px-6"><div><h3 className="text-lg font-bold">订阅源列表</h3><p className="mt-0.5 text-xs text-base-content/50">管理启用状态、同步与独占运行</p></div><span className="badge badge-ghost">{subscriptions.length} 项</span></div>
+          {subscriptions.length ? <div className="space-y-3 p-4 lg:p-6">{subscriptions.map((subscription) => (
             <article key={subscription.id} className={`rounded-xl border bg-base-200/30 p-4 ${subscription.enabled ? 'border-base-300' : 'border-base-200 opacity-70'}`}>
               {editing?.id === subscription.id ? (
                 <div className="grid gap-3 sm:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto]">
@@ -155,9 +157,9 @@ export default function SubscriptionsPanel() {
               )}
               {deleteTarget?.id === subscription.id && <div className="alert alert-warning mt-3 flex-col items-start sm:flex-row sm:items-center"><span>确认删除订阅“{subscription.name}”？此操作会同步更新运行时节点。</span><div className="flex gap-2 sm:ml-auto"><button className="btn btn-error btn-sm" disabled={busy} onClick={() => void runAction(`delete-${subscription.id}`, () => deleteSubscription(subscription.id), '订阅已删除').then((deleted) => deleted && setDeleteTarget(null))}>确认删除</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setDeleteTarget(null)}>取消</button></div></div>}
             </article>
-          ))}</div> : <div className="mt-5 rounded-xl border border-dashed border-base-300 bg-base-200/20 px-4 py-12 text-center"><p className="font-medium text-base-content/60">暂无订阅链接</p><p className="mt-1 text-sm text-base-content/40">在上方添加节点订阅地址</p></div>}
+          ))}</div> : <div className="m-4 rounded-xl border border-dashed border-base-300 bg-base-200/20 px-4 py-12 text-center lg:m-6"><p className="font-medium text-base-content/60">暂无订阅链接</p><p className="mt-1 text-sm text-base-content/40">在上方添加节点订阅地址</p></div>}
         </section>
-      </div>
-    </div>
+      </PageContent>
+    </PageLayout>
   )
 }
