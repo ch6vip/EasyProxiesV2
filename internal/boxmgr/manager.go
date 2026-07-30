@@ -1,6 +1,7 @@
 package boxmgr
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"easy_proxies/internal/builder"
 	"easy_proxies/internal/config"
@@ -198,6 +201,12 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	ctx := m.baseCtx
 	oldBox := m.currentBox
 	oldCfg := m.cfg
+	if oldBox != nil && runtimeConfigEqual(oldCfg, newCfg) {
+		m.mu.Unlock()
+		m.logger.Infof("reload skipped: runtime configuration unchanged")
+		return nil
+	}
+	drainTimeout := m.drainTimeout
 	m.currentBox = nil // Mark as reloading
 	m.mu.Unlock()
 
@@ -207,9 +216,10 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 
 	m.logger.Infof("reloading with %d nodes", len(newCfg.Nodes))
 
-	// For multi-port mode, we must close old instance first to release ports
-	// This causes a brief interruption but avoids port conflicts
+	// The old instance owns the listener ports, so let active connections drain
+	// before closing it and binding the replacement instance.
 	if oldBox != nil {
+		m.waitForConnectionsToDrain(drainTimeout)
 		m.logger.Infof("stopping old instance to release ports...")
 		if err := oldBox.Close(); err != nil {
 			m.logger.Warnf("error closing old instance: %v", err)
@@ -287,6 +297,35 @@ func (m *Manager) Reload(newCfg *config.Config) error {
 	}
 	m.logger.Infof("reload completed successfully with %d nodes", len(newCfg.Nodes))
 	return nil
+}
+
+func runtimeConfigEqual(a, b *config.Config) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	aYAML, aErr := yaml.Marshal(a)
+	bYAML, bErr := yaml.Marshal(b)
+	return aErr == nil && bErr == nil && bytes.Equal(aYAML, bYAML)
+}
+
+func (m *Manager) waitForConnectionsToDrain(timeout time.Duration) {
+	active := pool.ActiveConnections()
+	if active == 0 || timeout <= 0 {
+		return
+	}
+	m.logger.Infof("waiting up to %s for %d active connections to drain", timeout, active)
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for active > 0 && time.Now().Before(deadline) {
+		<-ticker.C
+		active = pool.ActiveConnections()
+	}
+	if active > 0 {
+		m.logger.Warnf("drain timeout reached with %d active connections", active)
+	} else {
+		m.logger.Infof("active connections drained")
+	}
 }
 
 // AddConfigListener registers a listener to be notified when config changes after reload.
