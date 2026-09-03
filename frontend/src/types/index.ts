@@ -167,6 +167,7 @@ export interface ConfigNodePayload {
 }
 
 export interface ConfigNodeConfig {
+  id?: number
   name: string
   uri: string
   port: number
@@ -181,9 +182,29 @@ export interface ConfigNodesResponse {
   nodes: ConfigNodeConfig[]
 }
 
+export type NodeApplyState = 'applied' | 'failed' | 'queued' | 'running' | 'succeeded'
+
 export interface ConfigNodeMutationResponse {
   node?: ConfigNodeConfig
   message: string
+  persisted: boolean
+  applied: boolean
+  need_reload: boolean
+  apply_state: NodeApplyState
+  reload_error?: string
+  reload_id?: string
+  reload_state?: 'queued' | 'running' | 'succeeded' | 'failed'
+  errors?: string[]
+  success?: number
+  total?: number
+}
+
+export interface ReloadTaskStatus {
+  reload_id?: string
+  reload_state: 'queued' | 'running' | 'succeeded' | 'failed'
+  reload_error?: string
+  reload_started_at?: string
+  reload_finished_at?: string
 }
 
 // ---- Subscription types ----

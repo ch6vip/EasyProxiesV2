@@ -63,7 +63,12 @@ type ConfigUpdateListener interface {
 
 // Manager owns the lifecycle of the active sing-box instance.
 type Manager struct {
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	reloadMu sync.Mutex // serializes runtime transitions
+
+	reloadStateMu sync.RWMutex
+	reloadState   monitor.ReloadTaskStatus
+	reloadSeq     uint64
 
 	currentBox    *box.Box
 	monitorMgr    *monitor.Manager
@@ -91,8 +96,9 @@ type Manager struct {
 // New creates a BoxManager with the given config.
 func New(cfg *config.Config, monitorCfg monitor.Config, opts ...Option) *Manager {
 	m := &Manager{
-		cfg:        cfg,
-		monitorCfg: monitorCfg,
+		cfg:         cfg,
+		monitorCfg:  monitorCfg,
+		reloadState: monitor.ReloadTaskStatus{State: "succeeded"},
 	}
 	m.applyConfigSettings(cfg)
 	for _, opt := range opts {
@@ -185,10 +191,19 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Reload gracefully switches to a new configuration.
-// For multi-port mode, we must stop the old instance first to release ports.
-// Supports transitioning from idle state (0 nodes → has nodes).
+// Reload serializes runtime transitions so concurrent API, subscription,
+// and background refresh operations cannot observe the manager half-way through
+// a stop/start cycle.
 func (m *Manager) Reload(newCfg *config.Config) error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+	return m.reload(newCfg)
+}
+
+// reload performs the actual runtime transition. Callers must hold reloadMu.
+// For multi-port mode, we must stop the old instance first to release ports.
+// Supports transitioning from idle state (0 nodes -> has nodes).
+func (m *Manager) reload(newCfg *config.Config) error {
 	if newCfg == nil {
 		return errors.New("new config is nil")
 	}
@@ -642,6 +657,7 @@ func (m *Manager) ListConfigNodes(ctx context.Context, subscriptionID *int64) ([
 			port = runtimePort
 		}
 		result = append(result, monitor.ManagedNodeConfig{
+			ID:              n.ID,
 			Name:            n.Name,
 			URI:             n.URI,
 			Port:            port,
@@ -708,75 +724,130 @@ func (m *Manager) CreateNode(ctx context.Context, node config.NodeConfig) (confi
 	return normalized, nil
 }
 
-// UpdateNode updates an existing node by name and persists to the Store.
-func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeConfig) (config.NodeConfig, error) {
+// UpdateNodeByID updates an existing node by its stable database ID.
+// Using IDs avoids name collisions and remains valid when the node is renamed.
+func (m *Manager) UpdateNodeByID(ctx context.Context, id int64, node config.NodeConfig) (config.NodeConfig, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return config.NodeConfig{}, err
 		}
 	}
-
-	name = strings.TrimSpace(name)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.cfg == nil {
-		return config.NodeConfig{}, errConfigUnavailable
-	}
-
-	idx := m.nodeIndexLocked(name)
-	if idx == -1 {
+	if id <= 0 {
 		return config.NodeConfig{}, monitor.ErrNodeNotFound
 	}
 
-	normalized, err := m.prepareNodeLocked(node, name)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return config.NodeConfig{}, errConfigUnavailable
+	}
+	if m.store == nil {
+		return config.NodeConfig{}, fmt.Errorf("按 ID 更新节点需要数据存储")
+	}
+
+	existing, err := m.store.GetNode(ctx, id)
+	if err != nil {
+		return config.NodeConfig{}, fmt.Errorf("lookup node %d in store: %w", id, err)
+	}
+	if existing == nil {
+		return config.NodeConfig{}, monitor.ErrNodeNotFound
+	}
+
+	idx := m.nodeIndexLocked(existing.Name)
+	currentName := existing.Name
+	normalized, err := m.prepareNodeLocked(node, currentName)
 	if err != nil {
 		return config.NodeConfig{}, err
 	}
+	normalized.Source = config.NodeSource(existing.Source)
+	normalized.Disabled = !existing.Enabled
 
-	// Preserve the original source
-	normalized.Source = m.cfg.Nodes[idx].Source
+	existing.URI = normalized.URI
+	existing.Name = normalized.Name
+	existing.Port = normalized.Port
+	existing.Username = normalized.Username
+	existing.Password = normalized.Password
+	if err := m.store.UpdateNode(ctx, existing); err != nil {
+		return config.NodeConfig{}, fmt.Errorf("update node %d in store: %w", id, err)
+	}
+	if idx != -1 {
+		m.cfg.Nodes[idx] = normalized
+	}
+	return normalized, nil
+}
 
-	// Persist to Store if available
+// UpdateNode updates an existing node by name for backwards compatibility.
+func (m *Manager) UpdateNode(ctx context.Context, name string, node config.NodeConfig) (config.NodeConfig, error) {
+	name = strings.TrimSpace(name)
 	if m.store != nil {
 		existing, err := m.store.GetNodeByName(ctx, name)
 		if err != nil {
 			return config.NodeConfig{}, fmt.Errorf("lookup in store: %w", err)
 		}
-		if existing != nil {
-			existing.URI = normalized.URI
-			existing.Name = normalized.Name
-			existing.Port = normalized.Port
-			existing.Username = normalized.Username
-			existing.Password = normalized.Password
-			if err := m.store.UpdateNode(ctx, existing); err != nil {
-				return config.NodeConfig{}, fmt.Errorf("update in store: %w", err)
-			}
+		if existing == nil {
+			return config.NodeConfig{}, monitor.ErrNodeNotFound
 		}
+		return m.UpdateNodeByID(ctx, existing.ID, node)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return config.NodeConfig{}, errConfigUnavailable
+	}
+	idx := m.nodeIndexLocked(name)
+	if idx == -1 {
+		return config.NodeConfig{}, monitor.ErrNodeNotFound
+	}
+	normalized, err := m.prepareNodeLocked(node, name)
+	if err != nil {
+		return config.NodeConfig{}, err
+	}
+	normalized.Source = m.cfg.Nodes[idx].Source
+	normalized.Disabled = m.cfg.Nodes[idx].Disabled
 	m.cfg.Nodes[idx] = normalized
 	return normalized, nil
 }
 
-// SetNodeEnabled enables or disables a node by name.
-// This only updates the store; a reload is needed for changes to take effect.
-func (m *Manager) SetNodeEnabled(ctx context.Context, name string, enabled bool) error {
+// SetNodeEnabledByID changes the desired state of a node by stable database ID.
+func (m *Manager) SetNodeEnabledByID(ctx context.Context, id int64, enabled bool) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
+	if id <= 0 {
+		return monitor.ErrNodeNotFound
+	}
 
-	name = strings.TrimSpace(name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	if m.cfg == nil {
 		return errConfigUnavailable
 	}
+	if m.store == nil {
+		return fmt.Errorf("按 ID 修改节点状态需要数据存储")
+	}
+	existing, err := m.store.GetNode(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup node %d in store: %w", id, err)
+	}
+	if existing == nil {
+		return monitor.ErrNodeNotFound
+	}
+	existing.Enabled = enabled
+	if err := m.store.UpdateNode(ctx, existing); err != nil {
+		return fmt.Errorf("update node %d in store: %w", id, err)
+	}
+	if !enabled {
+		m.removeRuntimeNodeLocked(existing.Name)
+	}
+	return nil
+}
 
-	// Update in Store
+// SetNodeEnabled changes the desired state by name for backwards compatibility.
+func (m *Manager) SetNodeEnabled(ctx context.Context, name string, enabled bool) error {
+	name = strings.TrimSpace(name)
 	if m.store != nil {
 		existing, err := m.store.GetNodeByName(ctx, name)
 		if err != nil {
@@ -785,70 +856,159 @@ func (m *Manager) SetNodeEnabled(ctx context.Context, name string, enabled bool)
 		if existing == nil {
 			return monitor.ErrNodeNotFound
 		}
-		existing.Enabled = enabled
-		if err := m.store.UpdateNode(ctx, existing); err != nil {
-			return fmt.Errorf("update in store: %w", err)
-		}
-	} else {
-		// No store — just check the node exists in config
-		idx := m.nodeIndexLocked(name)
-		if idx == -1 {
-			return monitor.ErrNodeNotFound
-		}
+		return m.SetNodeEnabledByID(ctx, existing.ID, enabled)
 	}
 
-	// If disabling, remove from active config nodes
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return errConfigUnavailable
+	}
+	idx := m.nodeIndexLocked(name)
+	if idx == -1 {
+		return monitor.ErrNodeNotFound
+	}
 	if !enabled {
-		idx := m.nodeIndexLocked(name)
-		if idx != -1 {
-			m.cfg.Nodes = append(m.cfg.Nodes[:idx], m.cfg.Nodes[idx+1:]...)
-		}
+		m.removeRuntimeNodeLocked(name)
 	}
-
 	return nil
 }
 
-// DeleteNode removes a node by name and deletes it from the Store.
-func (m *Manager) DeleteNode(ctx context.Context, name string) error {
+// DeleteNodeByID removes a node by stable database ID. Disabled nodes are
+// supported because they may not be present in the active runtime config.
+func (m *Manager) DeleteNodeByID(ctx context.Context, id int64) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
-
-	name = strings.TrimSpace(name)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.cfg == nil {
-		return errConfigUnavailable
-	}
-
-	idx := m.nodeIndexLocked(name)
-	if idx == -1 {
+	if id <= 0 {
 		return monitor.ErrNodeNotFound
 	}
 
-	// Delete from Store if available
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return errConfigUnavailable
+	}
+	if m.store == nil {
+		return fmt.Errorf("按 ID 删除节点需要数据存储")
+	}
+	existing, err := m.store.GetNode(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup node %d in store: %w", id, err)
+	}
+	if existing == nil {
+		return monitor.ErrNodeNotFound
+	}
+	if err := m.store.DeleteNode(ctx, id); err != nil {
+		return fmt.Errorf("delete node %d from store: %w", id, err)
+	}
+	m.removeRuntimeNodeLocked(existing.Name)
+	return nil
+}
+
+// DeleteNode removes a node by name for backwards compatibility.
+func (m *Manager) DeleteNode(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
 	if m.store != nil {
 		existing, err := m.store.GetNodeByName(ctx, name)
 		if err != nil {
 			return fmt.Errorf("lookup in store: %w", err)
 		}
-		if existing != nil {
-			if err := m.store.DeleteNode(ctx, existing.ID); err != nil {
-				return fmt.Errorf("delete from store: %w", err)
-			}
+		if existing == nil {
+			return monitor.ErrNodeNotFound
+		}
+		return m.DeleteNodeByID(ctx, existing.ID)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg == nil {
+		return errConfigUnavailable
+	}
+	idx := m.nodeIndexLocked(name)
+	if idx == -1 {
+		return monitor.ErrNodeNotFound
+	}
+	m.removeRuntimeNodeLocked(name)
+	return nil
+}
+
+func (m *Manager) removeRuntimeNodeLocked(name string) {
+	if idx := m.nodeIndexLocked(name); idx != -1 {
+		m.cfg.Nodes = append(m.cfg.Nodes[:idx], m.cfg.Nodes[idx+1:]...)
+	}
+}
+
+// QueueReload starts at most one asynchronous reload task at a time. Calls made
+// while a task is queued or running share the same task ID, which prevents a
+// burst of node mutations from creating competing stop/start transitions.
+func (m *Manager) QueueReload(ctx context.Context) (monitor.ReloadTaskStatus, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return monitor.ReloadTaskStatus{}, err
 		}
 	}
 
-	m.cfg.Nodes = append(m.cfg.Nodes[:idx], m.cfg.Nodes[idx+1:]...)
-	return nil
+	m.reloadStateMu.Lock()
+	if m.reloadState.State == "queued" || m.reloadState.State == "running" {
+		task := m.reloadState
+		m.reloadStateMu.Unlock()
+		return task, nil
+	}
+	m.reloadSeq++
+	task := monitor.ReloadTaskStatus{
+		ID:        fmt.Sprintf("reload-%d", m.reloadSeq),
+		State:     "queued",
+		StartedAt: time.Now().UTC(),
+	}
+	m.reloadState = task
+	m.reloadStateMu.Unlock()
+
+	go func(taskID string) {
+		m.reloadStateMu.Lock()
+		m.reloadState.State = "running"
+		m.reloadState.StartedAt = time.Now().UTC()
+		m.reloadStateMu.Unlock()
+
+		err := m.TriggerReload(context.Background())
+
+		m.reloadStateMu.Lock()
+		m.reloadState.FinishedAt = time.Now().UTC()
+		if err != nil {
+			m.reloadState.State = "failed"
+			m.reloadState.Error = err.Error()
+			m.logger.Errorf("reload task %s failed: %v", taskID, err)
+		} else {
+			m.reloadState.State = "succeeded"
+			m.reloadState.Error = ""
+		}
+		m.reloadStateMu.Unlock()
+	}(task.ID)
+
+	return task, nil
+}
+
+// CurrentReloadStatus returns a snapshot of the latest asynchronous reload.
+func (m *Manager) CurrentReloadStatus() monitor.ReloadTaskStatus {
+	m.reloadStateMu.RLock()
+	defer m.reloadStateMu.RUnlock()
+	return m.reloadState
 }
 
 // TriggerReload reloads the sing-box instance by re-reading config from disk
 // and loading nodes from the SQLite Store.
 func (m *Manager) TriggerReload(ctx context.Context) error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+	return m.triggerReload(ctx)
+}
+
+// triggerReload builds the desired runtime configuration and performs the
+// transition. Callers must hold reloadMu so port mappings and source state are
+// from one consistent point in time.
+func (m *Manager) triggerReload(ctx context.Context) error {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -856,13 +1016,14 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 	}
 
 	m.mu.RLock()
+	if m.cfg == nil {
+		m.mu.RUnlock()
+		return errConfigUnavailable
+	}
 	portMap := m.cfg.BuildPortMap() // Preserve existing port assignments
 	oldMode := m.lastAppliedMode
 	oldBasePort := m.lastAppliedBasePort
-	cfgPath := ""
-	if m.cfg != nil {
-		cfgPath = m.cfg.FilePath()
-	}
+	cfgPath := m.cfg.FilePath()
 	m.mu.RUnlock()
 
 	// Re-read config from disk using LoadForReload (only gets inline nodes + settings)
@@ -871,13 +1032,11 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 		var err error
 		newCfg, err = config.LoadForReload(cfgPath)
 		if err != nil {
-			m.logger.Warnf("failed to reload config from disk: %v, falling back to in-memory copy", err)
-			m.mu.RLock()
-			newCfg = m.copyConfigLocked()
-			m.mu.RUnlock()
-		} else {
-			m.logger.Infof("reloaded config from disk: %s", cfgPath)
+			// Never report a successful reload using a stale in-memory fallback:
+			// the caller may have just persisted a different configuration.
+			return fmt.Errorf("load config from disk: %w", err)
 		}
+		m.logger.Infof("reloaded config from disk: %s", cfgPath)
 	} else {
 		m.mu.RLock()
 		newCfg = m.copyConfigLocked()
@@ -888,38 +1047,51 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 		return errConfigUnavailable
 	}
 
-	// Merge inline nodes (from config.yaml) with store nodes (subscription + manual).
-	// Inline nodes take priority; store nodes are added if their URI is not already present.
+	// Build runtime nodes from the store using the same effective-node rules as
+	// startup and subscription refresh. This prevents disabled subscriptions or
+	// disabled nodes from reappearing after an unrelated manual reload.
 	if m.store != nil {
-		storeNodes, err := m.store.ListNodes(ctx, store.NodeFilter{})
+		regularNodes, err := m.store.ListNodes(ctx, store.NodeFilter{})
 		if err != nil {
-			m.logger.Warnf("failed to list nodes from store during reload: %v", err)
-		} else if len(storeNodes) > 0 {
-			// Build set of URIs already present from inline nodes
-			inlineURIs := make(map[string]bool, len(newCfg.Nodes))
-			for _, n := range newCfg.Nodes {
-				inlineURIs[n.URI] = true
-			}
-
-			// Merge store nodes, skipping duplicates and disabled nodes
-			for _, n := range storeNodes {
-				if !n.Enabled {
-					continue
-				}
-				if inlineURIs[n.URI] {
-					continue // inline node takes priority
-				}
-				newCfg.Nodes = append(newCfg.Nodes, config.NodeConfig{
-					Name:     n.Name,
-					URI:      n.URI,
-					Port:     n.Port,
-					Username: n.Username,
-					Password: n.Password,
-					Source:   config.NodeSource(n.Source),
-				})
-			}
-			m.logger.Infof("merged nodes for reload: %d inline + store nodes = %d total", len(inlineURIs), len(newCfg.Nodes))
+			return fmt.Errorf("list nodes from store during reload: %w", err)
 		}
+		effectiveSubscriptionNodes, err := m.store.ListEffectiveSubscriptionNodes(ctx)
+		if err != nil {
+			return fmt.Errorf("list effective subscription nodes during reload: %w", err)
+		}
+
+		newCfg.Nodes = make([]config.NodeConfig, 0, len(regularNodes)+len(effectiveSubscriptionNodes))
+		seen := make(map[string]struct{}, len(regularNodes)+len(effectiveSubscriptionNodes))
+		appendNode := func(n store.Node) {
+			if !n.Enabled || strings.TrimSpace(n.URI) == "" || n.Source == store.NodeSourceSubscription {
+				return
+			}
+			if _, ok := seen[n.URI]; ok {
+				return
+			}
+			seen[n.URI] = struct{}{}
+			newCfg.Nodes = append(newCfg.Nodes, config.NodeConfig{
+				Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
+				Password: n.Password, Source: config.NodeSource(n.Source),
+			})
+		}
+		for _, n := range regularNodes {
+			appendNode(n)
+		}
+		for _, n := range effectiveSubscriptionNodes {
+			if strings.TrimSpace(n.URI) == "" {
+				continue
+			}
+			if _, ok := seen[n.URI]; ok {
+				continue
+			}
+			seen[n.URI] = struct{}{}
+			newCfg.Nodes = append(newCfg.Nodes, config.NodeConfig{
+				Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
+				Password: n.Password, Source: config.NodeSource(n.Source),
+			})
+		}
+		m.logger.Infof("built effective runtime node set: %d nodes", len(newCfg.Nodes))
 	}
 
 	// If no enabled nodes available after merging, enter idle state:
@@ -941,11 +1113,17 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 		}
 	}
 
-	return m.ReloadWithPortMap(newCfg, portMap)
+	return m.reloadWithPortMap(newCfg, portMap)
 }
 
-// ReloadWithPortMap gracefully switches to a new configuration, preserving port assignments.
+// ReloadWithPortMap serializes and applies a prepared configuration.
 func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]uint16) error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+	return m.reloadWithPortMap(newCfg, portMap)
+}
+
+func (m *Manager) reloadWithPortMap(newCfg *config.Config, portMap map[string]uint16) error {
 	if newCfg == nil {
 		return errors.New("new config is nil")
 	}
@@ -962,7 +1140,7 @@ func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]ui
 		return fmt.Errorf("normalize config with port map: %w", err)
 	}
 
-	return m.Reload(newCfg)
+	return m.reload(newCfg)
 }
 
 // enterIdle stops the running sing-box instance when there are 0 enabled nodes.

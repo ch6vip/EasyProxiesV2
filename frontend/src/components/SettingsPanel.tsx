@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import type { SettingsData } from '../types'
 import {
   fetchSettings,
+  fetchReloadStatus,
   triggerReload,
   updateSettings,
 } from '../api/client'
@@ -73,6 +74,7 @@ export default function SettingsPanel() {
   const [reloadWarning, setReloadWarning] = useState('')
   const [success, setSuccess] = useState('')
   const [needReload, setNeedReload] = useState(false)
+  const [reloadId, setReloadId] = useState<string | null>(null)
   const [needRestart, setNeedRestart] = useState(false)
   const [applied, setApplied] = useState<string[]>([])
   const [pending, setPending] = useState<string[]>([])
@@ -81,12 +83,23 @@ export default function SettingsPanel() {
   useEffect(() => {
     const load = async () => {
       try {
-        const settingsData = await fetchSettings()
+        const [settingsData, reloadStatus] = await Promise.all([
+          fetchSettings(),
+          fetchReloadStatus().catch(() => null),
+        ])
         const subscriptions = settingsData.subscriptions || []
         const merged = { ...defaultSettings, ...settingsData, subscriptions }
         setSettings(merged)
         setSavedSettings(merged)
         setIsDirty(false)
+        if (reloadStatus?.reload_id && (reloadStatus.reload_state === 'queued' || reloadStatus.reload_state === 'running')) {
+          setReloadId(reloadStatus.reload_id)
+          setReloading(true)
+          setNeedReload(true)
+        } else if (reloadStatus?.reload_state === 'failed') {
+          setReloadWarning(`自动重载失败：${reloadStatus.reload_error || '未知错误'}`)
+          setNeedReload(true)
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载设置失败')
       } finally {
@@ -102,6 +115,45 @@ export default function SettingsPanel() {
       return () => clearTimeout(timer)
     }
   }, [success])
+
+  useEffect(() => {
+    if (!reloadId) return
+    let stopped = false
+    const poll = async () => {
+      try {
+        const status = await fetchReloadStatus()
+        if (stopped) return
+        if (status.reload_id && status.reload_id !== reloadId) {
+          setReloadId(status.reload_id)
+          return
+        }
+        if (status.reload_state === 'queued' || status.reload_state === 'running') {
+          setReloading(true)
+          setNeedReload(true)
+          return
+        }
+        setReloading(false)
+        setReloadId(null)
+        if (status.reload_state === 'succeeded') {
+          setNeedReload(false)
+          setReloadWarning('')
+          setSuccess('配置已完成重载并生效')
+          setPending(items => items.filter(item => item !== 'runtime_config'))
+        } else {
+          setNeedReload(true)
+          setReloadWarning(`重载失败：${status.reload_error || '未知错误'}`)
+        }
+      } catch {
+        // Retry on the next interval without hiding the pending state.
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [reloadId])
 
   const handleSave = async () => {
     setSaving(true)
@@ -134,9 +186,22 @@ export default function SettingsPanel() {
     setReloadWarning('')
     try {
       const res = await triggerReload()
-      setSuccess(res.message || '重载成功')
-      setNeedReload(false)
-      setPending(items => items.filter(item => item !== 'runtime_config'))
+      const task = res.reload
+      if (task?.reload_id && (task.reload_state === 'queued' || task.reload_state === 'running')) {
+        setReloadId(task.reload_id)
+        setReloading(true)
+        setNeedReload(true)
+        setSuccess(res.message || '重载任务已提交')
+      } else if (task?.reload_state === 'failed') {
+        setReloading(false)
+        setNeedReload(true)
+        setReloadWarning(`重载失败：${task.reload_error || '未知错误'}`)
+        setError(task.reload_error || '重载失败')
+      } else {
+        setSuccess(res.message || '重载成功')
+        setNeedReload(false)
+        setPending(items => items.filter(item => item !== 'runtime_config'))
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '重载失败')
     } finally {

@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import type { ConfigNodeConfig, ConfigNodePayload, NodeSnapshot, NodesResponse, Subscription } from '../types'
+import type { ConfigNodeConfig, ConfigNodeMutationResponse, ConfigNodePayload, NodeSnapshot, NodesResponse, Subscription } from '../types'
 import {
   fetchConfigNodes, createConfigNode, updateConfigNode, deleteConfigNode,
   toggleConfigNode, batchToggleConfigNodes, batchDeleteConfigNodes, triggerReload,
   importNodes, exportProxies,
-  fetchNodes, probeNode, releaseNode, listSubscriptions,
+  fetchNodes, probeNode, releaseNode, listSubscriptions, fetchReloadStatus,
 } from '../api/client'
+import type { ConfigNodeRef } from '../api/client'
 import { PageContent, PageHeader, PageLayout } from './ui/PageLayout'
 
 // ---- Merged node type ----
@@ -19,6 +20,14 @@ interface MergedNode extends ConfigNodeConfig {
   success_count: number
   failure_count: number
   tag?: string
+}
+
+function nodeKey(node: MergedNode): string {
+  return node.id && node.id > 0 ? `id:${node.id}` : `name:${node.name}`
+}
+
+function nodeRef(node: MergedNode): ConfigNodeRef {
+  return node.id && node.id > 0 ? node.id : node.name
 }
 
 // ---- Helpers ----
@@ -136,16 +145,19 @@ export default function ManagePanel() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [needReload, setNeedReload] = useState(false)
+  const [reloading, setReloading] = useState(false)
+  const [reloadWarning, setReloadWarning] = useState('')
+  const [reloadId, setReloadId] = useState<string | null>(null)
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false)
-  const [editingNode, setEditingNode] = useState<string | null>(null)
+  const [editingNode, setEditingNode] = useState<ConfigNodeRef | null>(null)
   const [form, setForm] = useState<ConfigNodePayload>(emptyPayload)
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   // Delete confirm
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<MergedNode | null>(null)
   const [deleting, setDeleting] = useState(false)
 
   // Toggle state
@@ -183,14 +195,23 @@ export default function ManagePanel() {
   const loadData = useCallback(async () => {
     try {
       setError('')
-      const [configRes, monitorRes, subscriptionsRes] = await Promise.all([
+      const [configRes, monitorRes, subscriptionsRes, reloadStatus] = await Promise.all([
         fetchConfigNodes(),
         fetchNodes().catch(() => null), // monitor data is optional
         listSubscriptions(),
+        fetchReloadStatus().catch(() => null),
       ])
       setConfigNodes(configRes.nodes || [])
       setSubscriptions(subscriptionsRes.subscriptions || [])
       if (monitorRes) setMonitorData(monitorRes)
+      if (reloadStatus?.reload_id && (reloadStatus.reload_state === 'queued' || reloadStatus.reload_state === 'running')) {
+        setReloadId(reloadStatus.reload_id)
+        setReloading(true)
+        setNeedReload(true)
+      } else if (reloadStatus?.reload_state === 'failed') {
+        setReloadWarning(`自动重载失败：${reloadStatus.reload_error || '未知错误'}`)
+        setNeedReload(true)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载节点失败')
     } finally {
@@ -209,6 +230,50 @@ export default function ManagePanel() {
       return () => clearTimeout(timer)
     }
   }, [success])
+
+  // Poll queued reloads instead of keeping the mutation request open.
+  useEffect(() => {
+    if (!reloadId) return
+    let stopped = false
+    const poll = async () => {
+      try {
+        const status = await fetchReloadStatus()
+        if (stopped) return
+        if (status.reload_id && status.reload_id !== reloadId) {
+          // Another mutation may have queued a newer reload; follow it instead
+          // of polling an obsolete task forever.
+          setReloadId(status.reload_id)
+          return
+        }
+        if (status.reload_state === 'queued' || status.reload_state === 'running') {
+          setReloading(true)
+          setNeedReload(true)
+          return
+        }
+        setReloading(false)
+        if (status.reload_state === 'succeeded') {
+          setNeedReload(false)
+          setReloadWarning('')
+          setSuccess('配置已完成重载并生效')
+          setReloadId(null)
+          await loadData()
+        } else {
+          setNeedReload(true)
+          setReloadWarning(`自动重载失败：${status.reload_error || '未知错误'}`)
+          setReloadId(null)
+        }
+      } catch {
+        // Keep the task ID and retry; a transient status request must not hide
+        // the pending reload warning.
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 1000)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [reloadId, loadData])
 
   // ---- Merge config + monitor data ----
 
@@ -320,12 +385,32 @@ export default function ManagePanel() {
     return [...filteredNodes].sort((a, b) => compareManageNodes(a, b, sortKey, sortDir))
   }, [filteredNodes, sortKey, sortDir])
 
-  const visibleSelectedNames = useMemo(
-    () => sortedNodes.filter(node => selectedNodes.has(node.name)).map(node => node.name),
+  const visibleSelectedNodes = useMemo(
+    () => sortedNodes.filter(node => selectedNodes.has(nodeKey(node))),
     [selectedNodes, sortedNodes],
+  )
+  const visibleSelectedNames = useMemo(
+    () => visibleSelectedNodes.map(node => node.name),
+    [visibleSelectedNodes],
+  )
+  const visibleSelectedRefs = useMemo(
+    () => visibleSelectedNodes.map(node => nodeRef(node)),
+    [visibleSelectedNodes],
   )
 
   // ---- Handlers ----
+
+  const showMutationResult = (res: ConfigNodeMutationResponse) => {
+    const queued = res.apply_state === 'queued' || res.apply_state === 'running'
+    setReloadId(res.reload_id || null)
+    setReloading(queued)
+    setNeedReload(!res.applied || queued)
+    setReloadWarning(res.reload_error ? `已保存，但自动重载失败：${res.reload_error}` : queued ? '配置已保存，正在后台重载运行实例…' : '')
+    if (res.errors?.length) {
+      setError(res.errors.join('；'))
+    }
+    setSuccess(res.applied ? (res.message || '操作已完成并生效') : queued ? `${res.message || '操作已保存'}，正在应用配置` : `${res.message || '操作已保存'}，运行时尚未生效`)
+  }
 
   const handleSort = (key: ManageSortKey) => {
     if (sortKey === key) {
@@ -344,7 +429,7 @@ export default function ManagePanel() {
   }
 
   const openEditModal = (node: MergedNode) => {
-    setEditingNode(node.name)
+    setEditingNode(nodeRef(node))
     setForm({
       name: node.name,
       uri: node.uri,
@@ -364,14 +449,8 @@ export default function ManagePanel() {
     setSubmitting(true)
     setFormError('')
     try {
-      if (editingNode) {
-        const res = await updateConfigNode(editingNode, form)
-        setSuccess(res.message || '节点已更新')
-      } else {
-        const res = await createConfigNode(form)
-        setSuccess(res.message || '节点已添加')
-      }
-      setNeedReload(true)
+      const res = editingNode ? await updateConfigNode(editingNode, form) : await createConfigNode(form)
+      showMutationResult(res)
       setModalOpen(false)
       await loadData()
     } catch (err) {
@@ -385,9 +464,8 @@ export default function ManagePanel() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      const res = await deleteConfigNode(deleteTarget)
-      setSuccess(res.message || '节点已删除')
-      setNeedReload(true)
+      const res = await deleteConfigNode(nodeRef(deleteTarget))
+      showMutationResult(res)
       setDeleteTarget(null)
       await loadData()
     } catch (err) {
@@ -399,10 +477,11 @@ export default function ManagePanel() {
 
   const handleToggle = async (node: MergedNode) => {
     const newEnabled = !!node.disabled
-    setToggling(node.name)
+    const key = nodeKey(node)
+    setToggling(key)
     try {
-      const res = await toggleConfigNode(node.name, newEnabled)
-      setSuccess(res.message || (newEnabled ? '节点已启用' : '节点已禁用'))
+      const res = await toggleConfigNode(nodeRef(node), newEnabled)
+      showMutationResult(res)
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '操作失败')
@@ -435,11 +514,12 @@ export default function ManagePanel() {
 
   // ---- Batch ----
 
-  const toggleSelectNode = (name: string) => {
+  const toggleSelectNode = (node: MergedNode) => {
+    const key = nodeKey(node)
     setSelectedNodes(prev => {
       const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -448,7 +528,7 @@ export default function ManagePanel() {
     if (visibleSelectedNames.length === sortedNodes.length) {
       setSelectedNodes(new Set())
     } else {
-      setSelectedNodes(new Set(sortedNodes.map(n => n.name)))
+      setSelectedNodes(new Set(sortedNodes.map(nodeKey)))
     }
   }
 
@@ -456,9 +536,10 @@ export default function ManagePanel() {
     if (visibleSelectedNames.length === 0) return
     setBatchProcessing(true)
     try {
-      const res = await batchToggleConfigNodes(visibleSelectedNames, enabled)
-      setSuccess(res.message || '批量操作完成')
-      setSelectedNodes(new Set())
+      const res = await batchToggleConfigNodes(visibleSelectedRefs, enabled)
+      showMutationResult(res)
+      // Keep failed items selected so the user can retry or inspect them.
+      if (!res.errors?.length) setSelectedNodes(new Set())
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '批量操作失败')
@@ -468,7 +549,7 @@ export default function ManagePanel() {
   }
 
   const handleBatchProbe = async () => {
-    const nodesToProbe = sortedNodes.filter(n => selectedNodes.has(n.name) && !n.disabled && n.tag)
+    const nodesToProbe = sortedNodes.filter(n => selectedNodes.has(nodeKey(n)) && !n.disabled && n.tag)
     if (nodesToProbe.length === 0) {
       setError('所选节点中没有可探测的节点（已禁用或无运行时标识的节点将被跳过）')
       return
@@ -510,9 +591,9 @@ export default function ManagePanel() {
     setBatchProcessing(true)
     setBatchDeleteConfirm(false)
     try {
-      const res = await batchDeleteConfigNodes(visibleSelectedNames)
-      setSuccess(res.message || '批量删除完成')
-      setSelectedNodes(new Set())
+      const res = await batchDeleteConfigNodes(visibleSelectedRefs)
+      showMutationResult(res)
+      if (!res.errors?.length) setSelectedNodes(new Set())
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : '批量删除失败')
@@ -580,14 +661,36 @@ export default function ManagePanel() {
   }
 
   const handleReload = async () => {
+    if (reloading) return
+    setReloading(true)
     try {
       setError('')
+      setReloadWarning('')
       const res = await triggerReload()
-      setSuccess(res.message || '重载成功')
-      setNeedReload(false)
-      await loadData()
+      const task = res.reload
+      if (task?.reload_id && (task.reload_state === 'queued' || task.reload_state === 'running')) {
+        setReloadId(task.reload_id)
+        setReloading(true)
+        setNeedReload(true)
+        setSuccess(res.message || '重载任务已提交')
+      } else if (task?.reload_state === 'failed') {
+        setReloadId(null)
+        setReloading(false)
+        setNeedReload(true)
+        setReloadWarning(`重载失败：${task.reload_error || '未知错误'}`)
+        setError(task.reload_error || '重载失败')
+      } else {
+        setReloadId(null)
+        setReloading(false)
+        setSuccess(res.message || '重载成功')
+        setNeedReload(false)
+        await loadData()
+      }
     } catch (err) {
+      setNeedReload(true)
       setError(err instanceof Error ? err.message : '重载失败')
+    } finally {
+      setReloading(false)
     }
   }
 
@@ -645,7 +748,7 @@ export default function ManagePanel() {
               </ul>
             </div>
             {needReload && (
-              <button className="btn btn-warning btn-sm gap-2 shadow-sm animate-pulse lg:btn-md" onClick={handleReload} title="重载配置" aria-label="重载配置">
+              <button className="btn btn-warning btn-sm gap-2 shadow-sm animate-pulse lg:btn-md" onClick={handleReload} disabled={reloading} title="重载配置" aria-label="重载配置">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                 <span className="hidden sm:inline">重载生效</span>
               </button>
@@ -670,6 +773,11 @@ export default function ManagePanel() {
         <div role="alert" className="alert alert-success alert-soft text-sm">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
           <span>{success}</span>
+        </div>
+      )}
+      {reloadWarning && (
+        <div role="alert" className="alert alert-warning alert-soft text-sm">
+          <span>{reloadWarning}</span>
         </div>
       )}
       {needReload && (
@@ -850,20 +958,20 @@ export default function ManagePanel() {
               ) : (
                 sortedNodes.map((node) => (
                   <tr
-                    key={node.name}
+                    key={nodeKey(node)}
                     className={`
                       transition-colors border-b border-base-200/50 last:border-none group
                       ${node.runtimeStatus === 'disabled' ? 'opacity-50 grayscale-[0.5]' : ''}
                       ${node.runtimeStatus === 'blacklisted' ? 'opacity-80' : ''}
-                      ${selectedNodes.has(node.name) ? 'bg-primary/5' : 'hover:bg-base-200/40'}
+                      ${selectedNodes.has(nodeKey(node)) ? 'bg-primary/5' : 'hover:bg-base-200/40'}
                     `}
                   >
                     <td className="w-8">
                       <input
                         type="checkbox"
                         className="checkbox checkbox-sm"
-                        checked={selectedNodes.has(node.name)}
-                        onChange={() => toggleSelectNode(node.name)}
+                        checked={selectedNodes.has(nodeKey(node))}
+                        onChange={() => toggleSelectNode(node)}
                       />
                     </td>
                     <td>
@@ -914,10 +1022,10 @@ export default function ManagePanel() {
                         <button
                           className={`btn btn-sm btn-square btn-ghost ${node.disabled ? 'text-success hover:bg-success/10' : 'text-warning hover:bg-warning/10'}`}
                           onClick={() => handleToggle(node)}
-                          disabled={toggling === node.name}
+                          disabled={toggling === nodeKey(node)}
                           title={node.disabled ? '启用该节点' : '禁用该节点'}
                         >
-                          {toggling === node.name
+                          {toggling === nodeKey(node)
                             ? <span className="loading loading-spinner loading-xs"></span>
                             : node.disabled
                                 ? <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" /></svg>
@@ -935,7 +1043,7 @@ export default function ManagePanel() {
                         {/* Delete */}
                         <button
                           className="btn btn-sm btn-square btn-ghost text-error hover:bg-error/10"
-                          onClick={() => setDeleteTarget(node.name)}
+                          onClick={() => setDeleteTarget(node)}
                           title="删除节点"
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -1091,7 +1199,7 @@ export default function ManagePanel() {
           <div className="modal-box max-w-sm">
             <h3 className="font-bold text-lg mb-2">确认删除</h3>
             <p className="text-base-content/70">
-              确定要删除节点 <strong>{deleteTarget}</strong> 吗？此操作不可撤销。
+              确定要删除节点 <strong>{deleteTarget.name}</strong> 吗？此操作不可撤销。
             </p>
             <div className="modal-action">
               <button className="btn btn-ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button>

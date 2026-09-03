@@ -7,6 +7,7 @@ import type {
   ConfigNodesResponse,
   ConfigNodePayload,
   ConfigNodeMutationResponse,
+  ReloadTaskStatus,
   SubscriptionStatus,
   Subscription,
   SubscriptionPayload,
@@ -338,44 +339,70 @@ export async function createConfigNode(payload: ConfigNodePayload): Promise<Conf
   })
 }
 
-export async function updateConfigNode(name: string, payload: ConfigNodePayload): Promise<ConfigNodeMutationResponse> {
-  return request<ConfigNodeMutationResponse>(`/api/nodes/config/${encodeURIComponent(name)}`, {
+export type ConfigNodeRef = number | string
+
+function configNodePath(ref: ConfigNodeRef): string {
+  return typeof ref === 'number' && ref > 0
+    ? `/api/nodes/config/id/${encodeURIComponent(String(ref))}`
+    : `/api/nodes/config/${encodeURIComponent(String(ref))}`
+}
+
+export async function updateConfigNode(ref: ConfigNodeRef, payload: ConfigNodePayload): Promise<ConfigNodeMutationResponse> {
+  return request<ConfigNodeMutationResponse>(configNodePath(ref), {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
 }
 
-export async function deleteConfigNode(name: string): Promise<ConfigNodeMutationResponse> {
-  return request<ConfigNodeMutationResponse>(`/api/nodes/config/${encodeURIComponent(name)}`, {
+export async function deleteConfigNode(ref: ConfigNodeRef): Promise<ConfigNodeMutationResponse> {
+  return request<ConfigNodeMutationResponse>(configNodePath(ref), {
     method: 'DELETE',
   })
 }
 
-export async function toggleConfigNode(name: string, enabled: boolean): Promise<ConfigNodeMutationResponse> {
-  return request<ConfigNodeMutationResponse>(`/api/nodes/config/${encodeURIComponent(name)}`, {
+export async function toggleConfigNode(ref: ConfigNodeRef, enabled: boolean): Promise<ConfigNodeMutationResponse> {
+  return request<ConfigNodeMutationResponse>(configNodePath(ref), {
     method: 'PATCH',
     body: JSON.stringify({ enabled }),
   })
 }
 
-export async function batchToggleConfigNodes(names: string[], enabled: boolean): Promise<{ message: string; success: number; total: number; errors?: string[] }> {
+function splitConfigNodeRefs(refs: ConfigNodeRef[]): { ids?: number[]; names?: string[] } {
+  const ids = refs.filter((ref): ref is number => typeof ref === 'number' && ref > 0)
+  const names = refs.filter((ref): ref is string => typeof ref === 'string')
+  return {
+    ...(ids.length ? { ids } : {}),
+    ...(names.length ? { names } : {}),
+  }
+}
+
+export async function batchToggleConfigNodes(refs: ConfigNodeRef[], enabled: boolean): Promise<ConfigNodeMutationResponse> {
   return request('/api/nodes/config/batch-toggle', {
     method: 'POST',
-    body: JSON.stringify({ names, enabled }),
+    body: JSON.stringify({ ...splitConfigNodeRefs(refs), enabled }),
   })
 }
 
-export async function batchDeleteConfigNodes(names: string[]): Promise<{ message: string; success: number; total: number; errors?: string[] }> {
+export async function batchDeleteConfigNodes(refs: ConfigNodeRef[]): Promise<ConfigNodeMutationResponse> {
   return request('/api/nodes/config/batch-delete', {
     method: 'POST',
-    body: JSON.stringify({ names }),
+    body: JSON.stringify(splitConfigNodeRefs(refs)),
   })
 }
 
 // ---- Reload API ----
 
-export async function triggerReload(): Promise<{ message: string }> {
-  return request('/api/reload', { method: 'POST' })
+export interface ReloadResponse {
+  message: string
+  reload?: ReloadTaskStatus
+}
+
+export async function triggerReload(): Promise<ReloadResponse> {
+  return request<ReloadResponse>('/api/reload', { method: 'POST' })
+}
+
+export async function fetchReloadStatus(): Promise<ReloadTaskStatus> {
+  return request<ReloadTaskStatus>('/api/reload/status')
 }
 
 // ---- Subscription API ----

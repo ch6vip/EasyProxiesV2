@@ -38,9 +38,32 @@ type Session struct {
 }
 
 // NodeManager exposes config node CRUD and reload operations.
+// ReloadTaskStatus describes an asynchronous runtime reload.
+// A reload can outlive the HTTP request because stopping old proxy instances
+// may wait for active connections to drain.
+type ReloadTaskStatus struct {
+	ID         string    `json:"reload_id,omitempty"`
+	State      string    `json:"reload_state"` // queued, running, succeeded, failed
+	Error      string    `json:"reload_error,omitempty"`
+	StartedAt  time.Time `json:"reload_started_at,omitempty"`
+	FinishedAt time.Time `json:"reload_finished_at,omitempty"`
+}
+
+// AsyncNodeReloader is implemented by managers that can queue a reload
+// without holding the HTTP request open until connection draining completes.
+type AsyncNodeReloader interface {
+	QueueReload(ctx context.Context) (ReloadTaskStatus, error)
+	CurrentReloadStatus() ReloadTaskStatus
+}
+
 type NodeManager interface {
 	ListConfigNodes(ctx context.Context, subscriptionID *int64) ([]ManagedNodeConfig, error)
 	CreateNode(ctx context.Context, node config.NodeConfig) (config.NodeConfig, error)
+	// ID-based mutations are the preferred API. Name-based methods remain for
+	// backwards compatibility with older clients.
+	UpdateNodeByID(ctx context.Context, id int64, node config.NodeConfig) (config.NodeConfig, error)
+	DeleteNodeByID(ctx context.Context, id int64) error
+	SetNodeEnabledByID(ctx context.Context, id int64, enabled bool) error
 	UpdateNode(ctx context.Context, name string, node config.NodeConfig) (config.NodeConfig, error)
 	DeleteNode(ctx context.Context, name string) error
 	SetNodeEnabled(ctx context.Context, name string, enabled bool) error
@@ -49,6 +72,7 @@ type NodeManager interface {
 
 // ManagedNodeConfig is the flattened API representation used by node management.
 type ManagedNodeConfig struct {
+	ID              int64             `json:"id"`
 	Name            string            `json:"name"`
 	URI             string            `json:"uri"`
 	Port            uint16            `json:"port"`
@@ -133,7 +157,8 @@ type Server struct {
 	sessionTTL time.Duration
 
 	// Concurrency control
-	probeSem *semaphore.Weighted
+	probeSem   *semaphore.Weighted
+	settingsMu sync.Mutex // serializes read-modify-write settings updates
 
 	// Lifecycle
 	done chan struct{} // closed on Shutdown to stop background goroutines
@@ -189,6 +214,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
 	mux.HandleFunc("/api/subscriptions", s.withAuth(s.handleSubscriptions))
 	mux.HandleFunc("/api/subscriptions/", s.withAuth(s.handleSubscriptionItem))
+	mux.HandleFunc("/api/reload/status", s.withAuth(s.handleReloadStatus))
 	mux.HandleFunc("/api/reload", s.withAuth(s.handleReload))
 
 	// Default handler for static assets (React App)
@@ -402,6 +428,9 @@ func (s *Server) getAllSettings() allSettingsResponse {
 
 // updateAllSettings applies all settings from request and persists to config file.
 func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) (SettingsUpdateResult, error) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
 	// Validate request before applying
 	if err := config.ValidateSettingsRequest(
 		req.Mode, req.ListenerPort, req.MultiPortBasePort,
@@ -1564,24 +1593,41 @@ func (s *Server) handleConfigNodes(w http.ResponseWriter, r *http.Request) {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"node": node, "message": "节点已添加，请点击重载使配置生效"})
+		result := s.nodeMutationStatus(r.Context(), true)
+		result["node"] = node
+		result["message"] = "节点已创建"
+		writeJSON(w, result)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
 // handleConfigNodeItem handles PUT (update) and DELETE for a specific config node.
+// New clients should pass the stable database ID in the path. Name paths are
+// still accepted for compatibility with older clients.
 func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureNodeManager(w) {
 		return
 	}
 
-	namePart := strings.TrimPrefix(r.URL.Path, "/api/nodes/config/")
-	nodeName, err := url.PathUnescape(namePart)
-	if err != nil || nodeName == "" {
+	ref := strings.TrimPrefix(r.URL.Path, "/api/nodes/config/")
+	ref, err := url.PathUnescape(ref)
+	if err != nil || ref == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]any{"error": "节点名称无效"})
+		writeJSON(w, map[string]any{"error": "节点标识无效"})
 		return
+	}
+	// Explicit /id/<value> paths keep backwards compatibility for legacy
+	// clients that used a numeric node name.
+	id := int64(0)
+	byID := strings.HasPrefix(ref, "id/")
+	if byID {
+		id, err = strconv.ParseInt(strings.TrimPrefix(ref, "id/"), 10, 64)
+		if err != nil || id <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"error": "节点 ID 无效"})
+			return
+		}
 	}
 
 	switch r.Method {
@@ -1592,12 +1638,20 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"error": "请求格式错误"})
 			return
 		}
-		node, err := s.nodeMgr.UpdateNode(r.Context(), nodeName, payload.toConfig())
+		var node config.NodeConfig
+		if byID {
+			node, err = s.nodeMgr.UpdateNodeByID(r.Context(), id, payload.toConfig())
+		} else {
+			node, err = s.nodeMgr.UpdateNode(r.Context(), ref, payload.toConfig())
+		}
 		if err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"node": node, "message": "节点已更新，请点击重载使配置生效"})
+		result := s.nodeMutationStatus(r.Context(), true)
+		result["node"] = node
+		result["message"] = "节点已更新"
+		writeJSON(w, result)
 	case http.MethodPatch:
 		var body struct {
 			Enabled *bool `json:"enabled"`
@@ -1612,7 +1666,12 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"error": "缺少 enabled 字段"})
 			return
 		}
-		if err := s.nodeMgr.SetNodeEnabled(r.Context(), nodeName, *body.Enabled); err != nil {
+		if byID {
+			err = s.nodeMgr.SetNodeEnabledByID(r.Context(), id, *body.Enabled)
+		} else {
+			err = s.nodeMgr.SetNodeEnabled(r.Context(), ref, *body.Enabled)
+		}
+		if err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
@@ -1620,21 +1679,22 @@ func (s *Server) handleConfigNodeItem(w http.ResponseWriter, r *http.Request) {
 		if !*body.Enabled {
 			action = "已禁用"
 		}
-		// Auto-reload after toggle
-		reloadMsg := ""
-		if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
-			s.logger.Printf("auto-reload after toggle failed: %v", err)
-			reloadMsg = "（自动重载失败，请手动重载）"
-		} else {
-			reloadMsg = "（已自动重载）"
-		}
-		writeJSON(w, map[string]any{"message": fmt.Sprintf("节点 %s %s%s", nodeName, action, reloadMsg)})
+		result := s.nodeMutationStatus(r.Context(), true)
+		result["message"] = fmt.Sprintf("节点 %s %s", ref, action)
+		writeJSON(w, result)
 	case http.MethodDelete:
-		if err := s.nodeMgr.DeleteNode(r.Context(), nodeName); err != nil {
+		if byID {
+			err = s.nodeMgr.DeleteNodeByID(r.Context(), id)
+		} else {
+			err = s.nodeMgr.DeleteNode(r.Context(), ref)
+		}
+		if err != nil {
 			s.respondNodeError(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"message": "节点已删除，请点击重载使配置生效"})
+		result := s.nodeMutationStatus(r.Context(), true)
+		result["message"] = "节点已删除"
+		writeJSON(w, result)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -1651,7 +1711,8 @@ func (s *Server) handleConfigNodesBatchToggle(w http.ResponseWriter, r *http.Req
 	}
 
 	var body struct {
-		Names   []string `json:"names"`
+		IDs     []int64  `json:"ids"`
+		Names   []string `json:"names"` // legacy clients
 		Enabled bool     `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1659,7 +1720,7 @@ func (s *Server) handleConfigNodesBatchToggle(w http.ResponseWriter, r *http.Req
 		writeJSON(w, map[string]any{"error": "请求格式错误"})
 		return
 	}
-	if len(body.Names) == 0 {
+	if len(body.IDs) == 0 && len(body.Names) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]any{"error": "节点列表为空"})
 		return
@@ -1667,6 +1728,14 @@ func (s *Server) handleConfigNodesBatchToggle(w http.ResponseWriter, r *http.Req
 
 	var errs []string
 	successCount := 0
+	total := len(body.IDs) + len(body.Names)
+	for _, id := range body.IDs {
+		if err := s.nodeMgr.SetNodeEnabledByID(r.Context(), id, body.Enabled); err != nil {
+			errs = append(errs, fmt.Sprintf("%d: %v", id, err))
+		} else {
+			successCount++
+		}
+	}
 	for _, name := range body.Names {
 		if err := s.nodeMgr.SetNodeEnabled(r.Context(), name, body.Enabled); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
@@ -1679,22 +1748,20 @@ func (s *Server) handleConfigNodesBatchToggle(w http.ResponseWriter, r *http.Req
 	if !body.Enabled {
 		action = "禁用"
 	}
-
-	// Auto-reload after batch toggle
-	reloadMsg := ""
-	if successCount > 0 {
-		if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
-			s.logger.Printf("auto-reload after batch toggle failed: %v", err)
-			reloadMsg = "（自动重载失败，请手动重载）"
-		} else {
-			reloadMsg = "（已自动重载）"
-		}
-	}
-
 	result := map[string]any{
-		"message": fmt.Sprintf("成功%s %d 个节点%s", action, successCount, reloadMsg),
-		"success": successCount,
-		"total":   len(body.Names),
+		"message":     fmt.Sprintf("成功%s %d 个节点", action, successCount),
+		"success":     successCount,
+		"total":       total,
+		"persisted":   successCount > 0,
+		"applied":     false,
+		"need_reload": successCount > 0,
+		"apply_state": "failed",
+	}
+	if successCount > 0 {
+		status := s.nodeMutationStatus(r.Context(), true)
+		for key, value := range status {
+			result[key] = value
+		}
 	}
 	if len(errs) > 0 {
 		result["errors"] = errs
@@ -1713,14 +1780,15 @@ func (s *Server) handleConfigNodesBatchDelete(w http.ResponseWriter, r *http.Req
 	}
 
 	var body struct {
-		Names []string `json:"names"`
+		IDs   []int64  `json:"ids"`
+		Names []string `json:"names"` // legacy clients
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]any{"error": "请求格式错误"})
 		return
 	}
-	if len(body.Names) == 0 {
+	if len(body.IDs) == 0 && len(body.Names) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSON(w, map[string]any{"error": "节点列表为空"})
 		return
@@ -1728,6 +1796,14 @@ func (s *Server) handleConfigNodesBatchDelete(w http.ResponseWriter, r *http.Req
 
 	var errs []string
 	successCount := 0
+	total := len(body.IDs) + len(body.Names)
+	for _, id := range body.IDs {
+		if err := s.nodeMgr.DeleteNodeByID(r.Context(), id); err != nil {
+			errs = append(errs, fmt.Sprintf("%d: %v", id, err))
+		} else {
+			successCount++
+		}
+	}
 	for _, name := range body.Names {
 		if err := s.nodeMgr.DeleteNode(r.Context(), name); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
@@ -1736,21 +1812,20 @@ func (s *Server) handleConfigNodesBatchDelete(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Auto-reload after batch delete
-	reloadMsg := ""
-	if successCount > 0 {
-		if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
-			s.logger.Printf("auto-reload after batch delete failed: %v", err)
-			reloadMsg = "（自动重载失败，请手动重载）"
-		} else {
-			reloadMsg = "（已自动重载）"
-		}
-	}
-
 	result := map[string]any{
-		"message": fmt.Sprintf("成功删除 %d 个节点%s", successCount, reloadMsg),
-		"success": successCount,
-		"total":   len(body.Names),
+		"message":     fmt.Sprintf("成功删除 %d 个节点", successCount),
+		"success":     successCount,
+		"total":       total,
+		"persisted":   successCount > 0,
+		"applied":     false,
+		"need_reload": successCount > 0,
+		"apply_state": "failed",
+	}
+	if successCount > 0 {
+		status := s.nodeMutationStatus(r.Context(), true)
+		for key, value := range status {
+			result[key] = value
+		}
 	}
 	if len(errs) > 0 {
 		result["errors"] = errs
@@ -1758,7 +1833,8 @@ func (s *Server) handleConfigNodesBatchDelete(w http.ResponseWriter, r *http.Req
 	writeJSON(w, result)
 }
 
-// handleReload triggers a configuration reload.
+// handleReload queues a configuration reload. The actual transition may take
+// longer than an HTTP request because existing connections can be drained.
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1768,13 +1844,90 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if reloader, ok := s.nodeMgr.(AsyncNodeReloader); ok {
+		task, err := reloader.QueueReload(r.Context())
+		if err != nil {
+			s.respondNodeError(w, err)
+			return
+		}
+		if task.State == "queued" || task.State == "running" {
+			w.WriteHeader(http.StatusAccepted)
+		}
+		writeJSON(w, map[string]any{
+			"message": "重载任务已提交，正在应用配置",
+			"reload":  task,
+		})
+		return
+	}
+
 	if err := s.nodeMgr.TriggerReload(r.Context()); err != nil {
 		s.respondNodeError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{
 		"message": "重载成功，现有连接已被中断",
+		"reload":  ReloadTaskStatus{State: "succeeded"},
 	})
+}
+
+// handleReloadStatus returns the latest reload task state. It is intentionally
+// safe to call while a reload is running.
+func (s *Server) handleReloadStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.ensureNodeManager(w) {
+		return
+	}
+	if reloader, ok := s.nodeMgr.(AsyncNodeReloader); ok {
+		writeJSON(w, reloader.CurrentReloadStatus())
+		return
+	}
+	writeJSON(w, ReloadTaskStatus{State: "succeeded"})
+}
+
+// nodeMutationStatus persists the result of a node mutation separately from
+// whether the new desired state has reached the running sing-box instance.
+func (s *Server) nodeMutationStatus(ctx context.Context, persisted bool) map[string]any {
+	result := map[string]any{
+		"persisted":   persisted,
+		"applied":     false,
+		"need_reload": persisted,
+		"apply_state": "failed",
+	}
+	if !persisted {
+		return result
+	}
+
+	if reloader, ok := s.nodeMgr.(AsyncNodeReloader); ok {
+		task, err := reloader.QueueReload(ctx)
+		if err != nil {
+			result["reload_error"] = err.Error()
+			return result
+		}
+		result["reload_id"] = task.ID
+		result["reload_state"] = task.State
+		result["apply_state"] = task.State
+		if task.Error != "" {
+			result["reload_error"] = task.Error
+		}
+		if task.State == "succeeded" {
+			result["applied"] = true
+			result["need_reload"] = false
+		}
+		return result
+	}
+
+	if err := s.nodeMgr.TriggerReload(ctx); err != nil {
+		s.logger.Printf("automatic reload after node mutation failed: %v", err)
+		result["reload_error"] = err.Error()
+		return result
+	}
+	result["applied"] = true
+	result["need_reload"] = false
+	result["apply_state"] = "applied"
+	return result
 }
 
 func (s *Server) ensureNodeManager(w http.ResponseWriter) bool {
