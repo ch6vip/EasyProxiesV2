@@ -165,7 +165,14 @@ func Build(cfg *config.Config) (option.Options, error) {
 			Mode:              cfg.Pool.Mode,
 			Members:           memberTags,
 			FailureThreshold:  cfg.Pool.FailureThreshold,
+			MinimumFailures:   cfg.Pool.MinimumFailures,
+			FailureWindow:     cfg.Pool.FailureWindow,
 			BlacklistDuration: cfg.Pool.BlacklistDuration,
+			HalfOpenInterval:  cfg.Pool.HalfOpenInterval,
+			BackoffBase:       cfg.Pool.BackoffBase,
+			BackoffMax:        cfg.Pool.BackoffMax,
+			LatencyThreshold:  cfg.Pool.LatencyThreshold,
+			LatencySamples:    cfg.Pool.LatencySamples,
 			Metadata:          metadata,
 		}
 		outbounds = append(outbounds, option.Outbound{
@@ -190,7 +197,14 @@ func Build(cfg *config.Config) (option.Options, error) {
 				Mode:              "sequential",
 				Members:           []string{tag},
 				FailureThreshold:  cfg.Pool.FailureThreshold,
+				MinimumFailures:   cfg.Pool.MinimumFailures,
+				FailureWindow:     cfg.Pool.FailureWindow,
 				BlacklistDuration: cfg.Pool.BlacklistDuration,
+				HalfOpenInterval:  cfg.Pool.HalfOpenInterval,
+				BackoffBase:       cfg.Pool.BackoffBase,
+				BackoffMax:        cfg.Pool.BackoffMax,
+				LatencyThreshold:  cfg.Pool.LatencyThreshold,
+				LatencySamples:    cfg.Pool.LatencySamples,
 				Metadata:          perMeta,
 			}
 			perPool := option.Outbound{
@@ -249,7 +263,14 @@ func Build(cfg *config.Config) (option.Options, error) {
 				Mode:              cfg.Pool.Mode,
 				Members:           members,
 				FailureThreshold:  cfg.Pool.FailureThreshold,
+				MinimumFailures:   cfg.Pool.MinimumFailures,
+				FailureWindow:     cfg.Pool.FailureWindow,
 				BlacklistDuration: cfg.Pool.BlacklistDuration,
+				HalfOpenInterval:  cfg.Pool.HalfOpenInterval,
+				BackoffBase:       cfg.Pool.BackoffBase,
+				BackoffMax:        cfg.Pool.BackoffMax,
+				LatencyThreshold:  cfg.Pool.LatencyThreshold,
+				LatencySamples:    cfg.Pool.LatencySamples,
 				Metadata:          regionMeta,
 			}
 			outbounds = append(outbounds, option.Outbound{

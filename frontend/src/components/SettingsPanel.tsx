@@ -40,8 +40,15 @@ const defaultSettings: SettingsData = {
   multi_port_password: '',
 
   pool_mode: 'sequential',
-  pool_failure_threshold: 3,
-  pool_blacklist_duration: '24h0m0s',
+  pool_failure_threshold: 8,
+  pool_minimum_failures: 5,
+  pool_failure_window: '1m0s',
+  pool_blacklist_duration: '5m0s',
+  pool_half_open_interval: '15s',
+  pool_backoff_base: '5s',
+  pool_backoff_max: '5m0s',
+  pool_latency_threshold: '2s',
+  pool_latency_samples: 5,
 
   management_enabled: true,
   management_listen: '0.0.0.0:9090',
@@ -581,29 +588,74 @@ export default function SettingsPanel() {
             </select>
           </fieldset>
 
-          <fieldset className="fieldset">
-            <legend className="fieldset-legend font-semibold text-base-content/80">失败阈值</legend>
-            <input
-              type="number"
-              className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
-              value={settings.pool_failure_threshold}
-              onChange={(e) => updateField('pool_failure_threshold', parseInt(e.target.value) || 1)}
-              min={1}
-            />
-            <p className="label text-base-content/50 mt-1">连续失败多少次后加入黑名单</p>
-          </fieldset>
+          <div className="grid gap-4 md:grid-cols-2">
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">故障计分阈值</legend>
+              <input
+                type="number"
+                className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                value={settings.pool_failure_threshold}
+                onChange={(e) => updateField('pool_failure_threshold', parseInt(e.target.value) || 1)}
+                min={1}
+              />
+              <p className="label text-base-content/50 mt-1">窗口内达到阈值才进入冷却，连接超时按较高权重计分</p>
+            </fieldset>
 
-          <fieldset className="fieldset">
-            <legend className="fieldset-legend font-semibold text-base-content/80">黑名单持续时间</legend>
-            <input
-              type="text"
-              className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
-              placeholder="例如: 24h, 1h30m"
-              value={settings.pool_blacklist_duration}
-              onChange={(e) => updateField('pool_blacklist_duration', e.target.value)}
-            />
-            <p className="label text-base-content/50 mt-1">Go duration 格式: 24h, 1h30m, 30m 等</p>
-          </fieldset>
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">最少故障次数</legend>
+              <input type="number" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                value={settings.pool_minimum_failures}
+                onChange={(e) => updateField('pool_minimum_failures', parseInt(e.target.value) || 1)} min={1} />
+              <p className="label text-base-content/50 mt-1">避免少量偶发错误触发节点冷却</p>
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">故障滑动窗口</legend>
+              <input type="text" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                placeholder="例如: 60s" value={settings.pool_failure_window}
+                onChange={(e) => updateField('pool_failure_window', e.target.value)} />
+              <p className="label text-base-content/50 mt-1">窗口外的旧错误自动过期</p>
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">半开探测间隔</legend>
+              <input type="text" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                placeholder="例如: 15s" value={settings.pool_half_open_interval}
+                onChange={(e) => updateField('pool_half_open_interval', e.target.value)} />
+              <p className="label text-base-content/50 mt-1">冷却后仅放行一个连接验证恢复情况</p>
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">退避初始时间</legend>
+              <input type="text" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                placeholder="例如: 5s" value={settings.pool_backoff_base}
+                onChange={(e) => updateField('pool_backoff_base', e.target.value)} />
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">退避上限</legend>
+              <input type="text" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                placeholder="例如: 5m" value={settings.pool_backoff_max}
+                onChange={(e) => updateField('pool_backoff_max', e.target.value)} />
+              <p className="label text-base-content/50 mt-1">重复探测失败会指数延长，但不超过此值</p>
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">高延迟阈值</legend>
+              <input type="text" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                placeholder="例如: 2s" value={settings.pool_latency_threshold}
+                onChange={(e) => updateField('pool_latency_threshold', e.target.value)} />
+              <p className="label text-base-content/50 mt-1">主池优先绕过超过阈值的节点</p>
+            </fieldset>
+
+            <fieldset className="fieldset">
+              <legend className="fieldset-legend font-semibold text-base-content/80">延迟采样数</legend>
+              <input type="number" className="input input-md w-full bg-base-200/50 focus:bg-base-100 transition-colors focus:border-primary/50"
+                value={settings.pool_latency_samples}
+                onChange={(e) => updateField('pool_latency_samples', parseInt(e.target.value) || 1)} min={1} max={20} />
+              <p className="label text-base-content/50 mt-1">使用最近多次探测平均值，降低单次抖动影响</p>
+            </fieldset>
+          </div>
         </div>
 
         {/* ===== 管理面板 ===== */}

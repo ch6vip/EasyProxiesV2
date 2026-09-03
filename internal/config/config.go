@@ -64,7 +64,14 @@ type ListenerConfig struct {
 type PoolConfig struct {
 	Mode              string        `yaml:"mode"`
 	FailureThreshold  int           `yaml:"failure_threshold"`
-	BlacklistDuration time.Duration `yaml:"blacklist_duration"`
+	MinimumFailures   int           `yaml:"minimum_failures"`
+	FailureWindow     time.Duration `yaml:"failure_window"`
+	BlacklistDuration time.Duration `yaml:"blacklist_duration"` // legacy compatibility
+	HalfOpenInterval  time.Duration `yaml:"half_open_interval"`
+	BackoffBase       time.Duration `yaml:"backoff_base"`
+	BackoffMax        time.Duration `yaml:"backoff_max"`
+	LatencyThreshold  time.Duration `yaml:"latency_threshold"`
+	LatencySamples    int           `yaml:"latency_samples"`
 }
 
 // MultiPortConfig defines address/credential defaults for multi-port mode.
@@ -253,10 +260,31 @@ func (c *Config) applyDefaults() error {
 		c.Pool.Mode = "sequential"
 	}
 	if c.Pool.FailureThreshold <= 0 {
-		c.Pool.FailureThreshold = 3
+		c.Pool.FailureThreshold = 8
+	}
+	if c.Pool.MinimumFailures <= 0 {
+		c.Pool.MinimumFailures = 5
+	}
+	if c.Pool.FailureWindow <= 0 {
+		c.Pool.FailureWindow = time.Minute
+	}
+	if c.Pool.HalfOpenInterval <= 0 {
+		c.Pool.HalfOpenInterval = 15 * time.Second
+	}
+	if c.Pool.BackoffBase <= 0 {
+		c.Pool.BackoffBase = 5 * time.Second
+	}
+	if c.Pool.BackoffMax <= 0 {
+		c.Pool.BackoffMax = 5 * time.Minute
 	}
 	if c.Pool.BlacklistDuration <= 0 {
-		c.Pool.BlacklistDuration = 24 * time.Hour
+		c.Pool.BlacklistDuration = c.Pool.BackoffMax
+	}
+	if c.Pool.LatencyThreshold <= 0 {
+		c.Pool.LatencyThreshold = 2 * time.Second
+	}
+	if c.Pool.LatencySamples <= 0 {
+		c.Pool.LatencySamples = 5
 	}
 	if c.MultiPort.Address == "" {
 		c.MultiPort.Address = "0.0.0.0"

@@ -39,10 +39,19 @@ listener:
 pool:
   # 调度模式: sequential（顺序轮询）, random（随机选择）, balance（最小连接数负载均衡）
   mode: sequential
-  # 连续失败多少次后加入黑名单
-  failure_threshold: 3
-  # 黑名单持续时间
-  blacklist_duration: 24h
+  # 滑动窗口内的严重故障阈值；同时至少达到 minimum_failures 才会进入冷却
+  failure_threshold: 8
+  minimum_failures: 5
+  failure_window: 60s
+  # 旧字段保留兼容；实际冷却由指数退避参数控制
+  blacklist_duration: 5m
+  # 冷却到期后只放行一个请求进行半开探测
+  half_open_interval: 15s
+  backoff_base: 5s
+  backoff_max: 5m
+  # 主池优先绕过超过此延迟的节点；所有节点都慢时保留最快一组
+  latency_threshold: 2s
+  latency_samples: 5
 
 # ───────────────────────────────────────────────────────────────
 # 多端口模式配置（multi-port / hybrid 模式使用）

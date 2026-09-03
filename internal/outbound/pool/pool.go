@@ -41,7 +41,14 @@ type Options struct {
 	Mode              string
 	Members           []string
 	FailureThreshold  int
-	BlacklistDuration time.Duration
+	MinimumFailures   int
+	FailureWindow     time.Duration
+	BlacklistDuration time.Duration // legacy compatibility; BackoffMax controls the actual cap
+	HalfOpenInterval  time.Duration
+	BackoffBase       time.Duration
+	BackoffMax        time.Duration
+	LatencyThreshold  time.Duration
+	LatencySamples    int
 	Metadata          map[string]MemberMeta
 }
 
@@ -152,10 +159,40 @@ func newPool(ctx context.Context, _ adapter.Router, logger log.ContextLogger, ta
 
 func normalizeOptions(options Options) Options {
 	if options.FailureThreshold <= 0 {
-		options.FailureThreshold = 3
+		options.FailureThreshold = 8
+	}
+	if options.MinimumFailures <= 0 {
+		options.MinimumFailures = 5
+	}
+	if options.FailureWindow <= 0 {
+		options.FailureWindow = time.Minute
+	}
+	if options.HalfOpenInterval <= 0 {
+		options.HalfOpenInterval = 15 * time.Second
+	}
+	if options.BackoffBase <= 0 {
+		options.BackoffBase = 5 * time.Second
+	}
+	if options.BackoffMax <= 0 {
+		options.BackoffMax = options.BlacklistDuration
+		if options.BackoffMax <= 0 || options.BackoffMax > 5*time.Minute {
+			options.BackoffMax = 5 * time.Minute
+		}
+	}
+	if options.BackoffMax < options.BackoffBase {
+		options.BackoffMax = options.BackoffBase
+	}
+	if options.BackoffMax < options.HalfOpenInterval {
+		options.BackoffMax = options.HalfOpenInterval
 	}
 	if options.BlacklistDuration <= 0 {
-		options.BlacklistDuration = 24 * time.Hour
+		options.BlacklistDuration = options.BackoffMax
+	}
+	if options.LatencyThreshold <= 0 {
+		options.LatencyThreshold = 2 * time.Second
+	}
+	if options.LatencySamples <= 0 {
+		options.LatencySamples = 5
 	}
 	if options.Metadata == nil {
 		options.Metadata = make(map[string]MemberMeta)
@@ -171,6 +208,48 @@ func normalizeOptions(options Options) Options {
 	return options
 }
 
+type failurePhase uint8
+
+const (
+	failurePhaseDial failurePhase = iota
+	failurePhaseStream
+)
+
+func classifyFailure(err error, phase failurePhase) failureClass {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return failureIgnored
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return failureDialTimeout
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return failureDialTimeout
+	}
+
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "context canceled") || strings.Contains(message, "use of closed network connection") {
+		return failureIgnored
+	}
+	if strings.Contains(message, "timeout") || strings.Contains(message, "i/o timeout") {
+		return failureDialTimeout
+	}
+	if strings.Contains(message, "connection reset") || strings.Contains(message, "reset by peer") {
+		if phase == failurePhaseDial {
+			return failureRealityReset
+		}
+		return failureTargetClosed
+	}
+	if strings.Contains(message, "broken pipe") || strings.Contains(message, "connection aborted") {
+		return failureTargetClosed
+	}
+	if strings.Contains(message, "reality") || strings.Contains(message, "tls:") || strings.Contains(message, "handshake") || strings.Contains(message, "crypto_error") || strings.Contains(message, "xtls") {
+		return failureProtocol
+	}
+	if phase == failurePhaseDial {
+		return failureDial
+	}
+	return failureUnknown
+}
 func (p *poolOutbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil
@@ -279,8 +358,8 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 		if err != nil {
 			p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
 			failedCount++
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
 				member.entry.MarkInitialCheckDone(false) // 标记为不可用
 			}
 			cancel()
@@ -294,8 +373,8 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 		if err != nil {
 			p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
 			failedCount++
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
 				member.entry.MarkInitialCheckDone(false)
 			}
 			cancel()
@@ -307,8 +386,8 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 		latencyMs := latency.Milliseconds()
 		p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
 		availableCount++
+		p.recordProbeSuccess(member, latency)
 		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(latency)
 			member.entry.MarkInitialCheckDone(true)
 		}
 
@@ -343,7 +422,7 @@ func (p *poolOutbound) DialContext(ctx context.Context, network string, destinat
 		conn, err := member.outbound.DialContext(ctx, network, destination)
 		if err != nil {
 			p.decActive(member)
-			p.recordFailure(member, err, dst)
+			p.recordFailure(member, err, failurePhaseDial, dst)
 			dialErr = err
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -373,7 +452,7 @@ func (p *poolOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr
 		conn, err := member.outbound.ListenPacket(ctx, destination)
 		if err != nil {
 			p.decActive(member)
-			p.recordFailure(member, err, dst)
+			p.recordFailure(member, err, failurePhaseDial, dst)
 			listenErr = err
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -401,22 +480,24 @@ func (p *poolOutbound) pickMemberExcluding(network string, excluded map[*memberS
 			return nil, err
 		}
 	}
+
+	// Due cooling nodes are admitted one at a time. Reserving the node before
+	// normal selection prevents concurrent requests from stampeding it.
+	if member := p.acquireHalfOpenMemberLocked(now, network, excluded); member != nil {
+		p.mu.Unlock()
+		p.putCandidateBuffer(candidates)
+		p.logger.Info("proxy ", member.tag, " entered half-open probe")
+		return member, nil
+	}
+
 	candidates = p.availableMembersLocked(now, network, candidates)
 	candidates = excludeMembers(candidates, excluded)
+	candidates = p.filterHighLatencyMembers(candidates)
 	p.mu.Unlock()
 
 	if len(candidates) == 0 {
-		p.mu.Lock()
-		if p.releaseIfAllBlacklistedLocked(now) {
-			candidates = p.availableMembersLocked(now, network, candidates)
-			candidates = excludeMembers(candidates, excluded)
-		}
-		p.mu.Unlock()
-	}
-
-	if len(candidates) == 0 {
 		p.putCandidateBuffer(candidates)
-		return nil, E.New("no healthy proxy available")
+		return nil, E.New("no healthy proxy available (cooling nodes will retry in half-open mode)")
 	}
 
 	member := p.selectMember(candidates)
@@ -424,6 +505,33 @@ func (p *poolOutbound) pickMemberExcluding(network string, excluded map[*memberS
 	return member, nil
 }
 
+func (p *poolOutbound) acquireHalfOpenMemberLocked(now time.Time, network string, excluded map[*memberState]struct{}) *memberState {
+	var selected *memberState
+	var earliest time.Time
+	for _, member := range p.members {
+		if member.shared == nil {
+			continue
+		}
+		if _, skip := excluded[member]; skip {
+			continue
+		}
+		if network != "" && !common.Contains(member.outbound.Network(), network) {
+			continue
+		}
+		readyAt, cooling := member.shared.halfOpenReadyAt()
+		if !cooling || now.Before(readyAt) {
+			continue
+		}
+		if selected == nil || readyAt.Before(earliest) {
+			selected = member
+			earliest = readyAt
+		}
+	}
+	if selected != nil && selected.shared.tryAcquireHalfOpen(now) {
+		return selected
+	}
+	return nil
+}
 func excludeMembers(candidates []*memberState, excluded map[*memberState]struct{}) []*memberState {
 	if len(excluded) == 0 {
 		return candidates
@@ -452,26 +560,57 @@ func (p *poolOutbound) availableMembersLocked(now time.Time, network string, buf
 	return result
 }
 
-func (p *poolOutbound) releaseIfAllBlacklistedLocked(now time.Time) bool {
-	if len(p.members) == 0 {
-		return false
+func (p *poolOutbound) filterHighLatencyMembers(candidates []*memberState) []*memberState {
+	if len(candidates) <= 1 || p.options.LatencyThreshold <= 0 {
+		return candidates
 	}
-	// Check if all members are blacklisted
-	for _, member := range p.members {
-		if member.shared == nil || !member.shared.isBlacklisted(now) {
-			return false
-		}
-	}
-	// All blacklisted, force release all
-	for _, member := range p.members {
-		if member.shared != nil {
-			member.shared.forceRelease()
-		}
-	}
-	p.logger.Warn("all upstream proxies were blacklisted, releasing them for retry")
-	return true
-}
 
+	var minLatency time.Duration
+	hasUnknown := false
+	hasFast := false
+	for _, member := range candidates {
+		if member.shared == nil {
+			hasUnknown = true
+			continue
+		}
+		latency, ok := member.shared.averageLatency()
+		if !ok {
+			hasUnknown = true
+			continue
+		}
+		if minLatency == 0 || latency < minLatency {
+			minLatency = latency
+		}
+		if latency <= p.options.LatencyThreshold {
+			hasFast = true
+		}
+	}
+	if minLatency == 0 {
+		return candidates
+	}
+
+	cutoff := p.options.LatencyThreshold
+	if !hasFast && !hasUnknown {
+		// If every measured node is slow, retain the fastest tier rather than
+		// making the pool unavailable.
+		cutoff = minLatency + minLatency/4
+	}
+	result := candidates[:0]
+	for _, member := range candidates {
+		if member.shared == nil {
+			result = append(result, member)
+			continue
+		}
+		latency, ok := member.shared.averageLatency()
+		if !ok || latency <= cutoff {
+			result = append(result, member)
+		}
+	}
+	if len(result) == 0 {
+		return candidates
+	}
+	return result
+}
 func (p *poolOutbound) selectMember(candidates []*memberState) *memberState {
 	switch p.mode {
 	case modeRandom:
@@ -499,22 +638,36 @@ func (p *poolOutbound) selectMember(candidates []*memberState) *memberState {
 	}
 }
 
-func (p *poolOutbound) recordFailure(member *memberState, cause error, destination string) {
+func (p *poolOutbound) recordFailure(member *memberState, cause error, phase failurePhase, destination string) {
+	class := classifyFailure(cause, phase)
 	if member.shared == nil {
-		p.logger.Warn("proxy ", member.tag, " failure (no shared state): ", cause)
+		p.logger.Warn("proxy ", member.tag, " failure (no shared state, class=", class, "): ", cause)
 		return
 	}
-	failures, blacklisted, _ := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration, destination)
-	if blacklisted {
-		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
+	result := member.shared.recordFailure(cause, class, p.options, destination)
+	if class == failureIgnored {
+		return
+	}
+	if result.triggered {
+		p.logger.Warn("proxy ", member.tag, " cooling down until ", result.nextRetryAt.Format(time.RFC3339), " (class=", class, ", events=", result.events, ", score=", result.score, "): ", cause)
 	} else {
-		p.logger.Warn("proxy ", member.tag, " failure ", failures, "/", p.options.FailureThreshold, ": ", cause)
+		p.logger.Warn("proxy ", member.tag, " failure class=", class, " events=", result.events, " score=", result.score, "/", p.options.FailureThreshold, ": ", cause)
 	}
 }
 
 func (p *poolOutbound) recordSuccess(member *memberState, destination string) {
 	if member.shared != nil {
 		member.shared.recordSuccess(destination)
+	}
+}
+
+func (p *poolOutbound) recordProbeSuccess(member *memberState, duration time.Duration) {
+	if member.shared != nil {
+		member.shared.recordProbeSuccess(duration, p.options.LatencySamples)
+		return
+	}
+	if member.entry != nil {
+		member.entry.RecordSuccessWithLatency(duration)
 	}
 }
 
@@ -530,7 +683,7 @@ func (p *poolOutbound) wrapConn(conn net.Conn, member *memberState, destination 
 			}
 		},
 		onError: func(err error) {
-			p.recordFailure(member, err, destination)
+			p.recordFailure(member, err, failurePhaseStream, destination)
 		},
 	}
 }
@@ -547,7 +700,7 @@ func (p *poolOutbound) wrapPacketConn(conn net.PacketConn, member *memberState, 
 			}
 		},
 		onError: func(err error) {
-			p.recordFailure(member, err, destination)
+			p.recordFailure(member, err, failurePhaseStream, destination)
 		},
 	}
 }
@@ -611,9 +764,7 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 		probeDst := destination.String()
 		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
 		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
-			}
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			return 0, err
 		}
 		defer conn.Close()
@@ -621,17 +772,13 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 		// Perform HTTP probe to measure actual latency (TTFB)
 		_, err = httpProbe(conn, destination.AddrString())
 		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
-			}
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			return 0, err
 		}
 
 		// Total duration = dial time + HTTP probe
 		duration := time.Since(start)
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(duration)
-		}
+		p.recordProbeSuccess(member, duration)
 		return duration, nil
 	}
 }
@@ -679,9 +826,7 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 		probeDst := destination.String()
 		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
 		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
-			}
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			return 0, err
 		}
 		defer conn.Close()
@@ -689,17 +834,13 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 		// Perform HTTP probe to measure actual latency (TTFB)
 		_, err = httpProbe(conn, destination.AddrString())
 		if err != nil {
-			if member.entry != nil {
-				member.entry.RecordFailure(err, probeDst)
-			}
+			p.recordFailure(member, err, failurePhaseDial, probeDst)
 			return 0, err
 		}
 
 		// Total duration = dial time + TTFB
 		duration := time.Since(start)
-		if member.entry != nil {
-			member.entry.RecordSuccessWithLatency(duration)
-		}
+		p.recordProbeSuccess(member, duration)
 		return duration, nil
 	}
 }

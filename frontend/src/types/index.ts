@@ -100,7 +100,14 @@ export interface SettingsData {
   // Pool
   pool_mode: string
   pool_failure_threshold: number
+  pool_minimum_failures: number
+  pool_failure_window: string
   pool_blacklist_duration: string
+  pool_half_open_interval: string
+  pool_backoff_base: string
+  pool_backoff_max: string
+  pool_latency_threshold: string
+  pool_latency_samples: number
 
   // Management
   management_enabled: boolean

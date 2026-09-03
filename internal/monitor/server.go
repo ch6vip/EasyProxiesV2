@@ -286,7 +286,14 @@ type allSettingsResponse struct {
 	// Pool
 	PoolMode              string `json:"pool_mode"`
 	PoolFailureThreshold  int    `json:"pool_failure_threshold"`
+	PoolMinimumFailures   int    `json:"pool_minimum_failures"`
+	PoolFailureWindow     string `json:"pool_failure_window"`
 	PoolBlacklistDuration string `json:"pool_blacklist_duration"`
+	PoolHalfOpenInterval  string `json:"pool_half_open_interval"`
+	PoolBackoffBase       string `json:"pool_backoff_base"`
+	PoolBackoffMax        string `json:"pool_backoff_max"`
+	PoolLatencyThreshold  string `json:"pool_latency_threshold"`
+	PoolLatencySamples    int    `json:"pool_latency_samples"`
 
 	// Management
 	ManagementEnabled             bool   `json:"management_enabled"`
@@ -338,7 +345,14 @@ type allSettingsRequest struct {
 	// Pool
 	PoolMode              string `json:"pool_mode"`
 	PoolFailureThreshold  int    `json:"pool_failure_threshold"`
+	PoolMinimumFailures   int    `json:"pool_minimum_failures"`
+	PoolFailureWindow     string `json:"pool_failure_window"`
 	PoolBlacklistDuration string `json:"pool_blacklist_duration"`
+	PoolHalfOpenInterval  string `json:"pool_half_open_interval"`
+	PoolBackoffBase       string `json:"pool_backoff_base"`
+	PoolBackoffMax        string `json:"pool_backoff_max"`
+	PoolLatencyThreshold  string `json:"pool_latency_threshold"`
+	PoolLatencySamples    int    `json:"pool_latency_samples"`
 
 	// Management
 	ManagementEnabled             *bool  `json:"management_enabled"`
@@ -402,7 +416,14 @@ func (s *Server) getAllSettings() allSettingsResponse {
 
 		PoolMode:              c.Pool.Mode,
 		PoolFailureThreshold:  c.Pool.FailureThreshold,
+		PoolMinimumFailures:   c.Pool.MinimumFailures,
+		PoolFailureWindow:     c.Pool.FailureWindow.String(),
 		PoolBlacklistDuration: c.Pool.BlacklistDuration.String(),
+		PoolHalfOpenInterval:  c.Pool.HalfOpenInterval.String(),
+		PoolBackoffBase:       c.Pool.BackoffBase.String(),
+		PoolBackoffMax:        c.Pool.BackoffMax.String(),
+		PoolLatencyThreshold:  c.Pool.LatencyThreshold.String(),
+		PoolLatencySamples:    c.Pool.LatencySamples,
 
 		ManagementEnabled:             mgmtEnabled,
 		ManagementListen:              c.Management.Listen,
@@ -442,6 +463,26 @@ func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) 
 		return SettingsUpdateResult{}, settingsValidationError{fmt.Errorf("参数验证失败: %w", err)}
 	}
 
+	poolDurations := []struct {
+		name  string
+		value string
+	}{
+		{"故障滑动窗口", req.PoolFailureWindow},
+		{"半开探测间隔", req.PoolHalfOpenInterval},
+		{"退避初始时间", req.PoolBackoffBase},
+		{"退避最大时间", req.PoolBackoffMax},
+		{"高延迟阈值", req.PoolLatencyThreshold},
+	}
+	for _, field := range poolDurations {
+		if field.value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(field.value)
+		if err != nil || d <= 0 {
+			return SettingsUpdateResult{}, settingsValidationError{fmt.Errorf("参数验证失败: %s格式无效: %q", field.name, field.value)}
+		}
+	}
+
 	s.cfgMu.RLock()
 	c := s.cfgSrc
 	s.cfgMu.RUnlock()
@@ -479,9 +520,30 @@ func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) 
 
 	// Pool
 	c.Pool.Mode = req.PoolMode
-	c.Pool.FailureThreshold = req.PoolFailureThreshold
-	if d, err := time.ParseDuration(req.PoolBlacklistDuration); err == nil && d > 0 {
-		c.Pool.BlacklistDuration = d
+	if req.PoolFailureThreshold > 0 {
+		c.Pool.FailureThreshold = req.PoolFailureThreshold
+	}
+	if req.PoolMinimumFailures > 0 {
+		c.Pool.MinimumFailures = req.PoolMinimumFailures
+	}
+	if req.PoolLatencySamples > 0 {
+		c.Pool.LatencySamples = req.PoolLatencySamples
+	}
+	poolDurationUpdates := []struct {
+		value string
+		dest  *time.Duration
+	}{
+		{req.PoolFailureWindow, &c.Pool.FailureWindow},
+		{req.PoolBlacklistDuration, &c.Pool.BlacklistDuration},
+		{req.PoolHalfOpenInterval, &c.Pool.HalfOpenInterval},
+		{req.PoolBackoffBase, &c.Pool.BackoffBase},
+		{req.PoolBackoffMax, &c.Pool.BackoffMax},
+		{req.PoolLatencyThreshold, &c.Pool.LatencyThreshold},
+	}
+	for _, update := range poolDurationUpdates {
+		if d, err := time.ParseDuration(update.value); err == nil && d > 0 {
+			*update.dest = d
+		}
 	}
 
 	// Management
