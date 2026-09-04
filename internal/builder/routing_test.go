@@ -1,11 +1,14 @@
 package builder
 
 import (
+	"context"
 	"testing"
 
 	"easy_proxies/internal/config"
 
 	C "github.com/sagernet/sing-box/constant"
+	singrule "github.com/sagernet/sing-box/route/rule"
+	"github.com/sagernet/sing/common/logger"
 )
 
 func TestBuildTrafficRoutingRules(t *testing.T) {
@@ -25,6 +28,20 @@ func TestBuildTrafficRoutingRules(t *testing.T) {
 	}
 	if got := rules[1].DefaultOptions.RuleAction.Action; got != C.RuleActionTypeReject {
 		t.Fatalf("reject action = %q", got)
+	}
+	if got := rules[1].DefaultOptions.RuleAction.RejectOptions.Method; got != C.RuleActionRejectMethodDefault {
+		t.Fatalf("reject method = %q, want %q", got, C.RuleActionRejectMethodDefault)
+	}
+	rejectAction, err := singrule.NewRuleAction(context.Background(), logger.NOP(), rules[1].DefaultOptions.RuleAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeReject, ok := rejectAction.(*singrule.RuleActionReject)
+	if !ok {
+		t.Fatalf("runtime reject action type = %T", rejectAction)
+	}
+	if rejectErr := runtimeReject.Error(context.Background()); !singrule.IsRejected(rejectErr) {
+		t.Fatalf("reject action returned %v, want rejected error", rejectErr)
 	}
 	if got := rules[2].DefaultOptions.RuleAction.RouteOptions.Outbound; got != "proxy-pool" {
 		t.Fatalf("proxy outbound = %q, want proxy-pool", got)

@@ -381,6 +381,10 @@ func newRouteRule(raw option.RawDefaultRule, action string) option.Rule {
 		ruleAction.Action = C.RuleActionTypeDirect
 	case config.RoutingActionReject:
 		ruleAction.Action = C.RuleActionTypeReject
+		// Programmatically constructed options do not pass through sing-box's
+		// JSON unmarshaller, so its empty-value default is never applied. An
+		// empty method reaches RuleActionReject.Error and panics at runtime.
+		ruleAction.RejectOptions.Method = C.RuleActionRejectMethodDefault
 	default:
 		ruleAction.Action = C.RuleActionTypeRoute
 		ruleAction.RouteOptions.Outbound = poolout.Tag
