@@ -58,11 +58,17 @@ type Store interface {
 	UpdateAllSubscriptionRefreshSettings(ctx context.Context, intervalSeconds, timeoutSeconds int) error
 	ActivateSubscriptionExclusive(ctx context.Context, id int64) error
 	ListSubscriptionNodes(ctx context.Context, subscriptionID int64) ([]SubscriptionNode, error)
+	ListSubscriptionRules(ctx context.Context, subscriptionID int64) ([]SubscriptionRule, error)
+	// ListEffectiveSubscriptionRules returns rules from the selected enabled
+	// subscription, or from the first enabled subscription containing rules when
+	// preferredSubscriptionID is zero.
+	ListEffectiveSubscriptionRules(ctx context.Context, preferredSubscriptionID int64) ([]SubscriptionRule, error)
 	// ListEffectiveSubscriptionNodes returns enabled nodes which are present in
 	// at least one enabled subscription, de-duplicated by node ID.
 	ListEffectiveSubscriptionNodes(ctx context.Context) ([]Node, error)
 	ReplaceSubscriptionNodes(ctx context.Context, subscriptionID int64, nodes []SubscriptionNodeInput) error
 	CommitSnapshot(ctx context.Context, subscriptionID int64, nodes []SubscriptionNodeInput, snapshot SubscriptionSnapshot) error
+	CommitSnapshotWithRules(ctx context.Context, subscriptionID int64, nodes []SubscriptionNodeInput, rules []SubscriptionRuleInput, snapshot SubscriptionSnapshot) error
 
 	// --- Node stats ---
 
@@ -182,6 +188,7 @@ type Subscription struct {
 	LastSuccess            time.Time `json:"last_success"`
 	LastError              string    `json:"last_error"`
 	NodeCount              int       `json:"node_count"`
+	RuleCount              int       `json:"rule_count"`
 	ETag                   string    `json:"etag"`
 	LastModified           string    `json:"last_modified"`
 	CreatedAt              time.Time `json:"created_at"`
@@ -206,6 +213,26 @@ type SubscriptionNodeInput struct {
 	Region   string `json:"region,omitempty"`
 	Country  string `json:"country,omitempty"`
 	Enabled  bool   `json:"enabled"`
+}
+
+// SubscriptionRule is one normalized routing rule in a subscription snapshot.
+type SubscriptionRule struct {
+	SubscriptionID int64  `json:"subscription_id"`
+	Position       int    `json:"position"`
+	Type           string `json:"type"`
+	Value          string `json:"value,omitempty"`
+	Action         string `json:"action"`
+	NoResolve      bool   `json:"no_resolve,omitempty"`
+	Raw            string `json:"raw,omitempty"`
+}
+
+// SubscriptionRuleInput contains the rule data committed during refresh.
+type SubscriptionRuleInput struct {
+	Type      string
+	Value     string
+	Action    string
+	NoResolve bool
+	Raw       string
 }
 
 // SubscriptionSnapshot is refresh metadata committed with a node snapshot.

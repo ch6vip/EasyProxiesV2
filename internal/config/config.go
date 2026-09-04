@@ -27,6 +27,7 @@ type Config struct {
 	Listener            ListenerConfig            `yaml:"listener"`
 	MultiPort           MultiPortConfig           `yaml:"multi_port"`
 	Pool                PoolConfig                `yaml:"pool"`
+	Routing             RoutingConfig             `yaml:"routing"`
 	Management          ManagementConfig          `yaml:"management"`
 	SubscriptionRefresh SubscriptionRefreshConfig `yaml:"subscription_refresh"`
 	GeoIP               GeoIPConfig               `yaml:"geoip"`
@@ -40,6 +41,35 @@ type Config struct {
 
 	filePath string `yaml:"-"` // 配置文件路径，用于保存
 }
+
+// RoutingConfig controls how traffic entering the shared pool listener is
+// dispatched. Rules is runtime-only and is hydrated from the selected
+// subscription snapshot in SQLite.
+type RoutingConfig struct {
+	Mode               string        `yaml:"mode"`
+	RuleSubscriptionID int64         `yaml:"rule_subscription_id,omitempty"`
+	Rules              []RoutingRule `yaml:"-"`
+}
+
+// RoutingRule is the normalized, provider-independent representation of a
+// Clash-compatible subscription rule.
+type RoutingRule struct {
+	Type      string `json:"type"`
+	Value     string `json:"value,omitempty"`
+	Action    string `json:"action"`
+	NoResolve bool   `json:"no_resolve,omitempty"`
+	Raw       string `json:"raw,omitempty"`
+}
+
+const (
+	RoutingModeGlobal = "global"
+	RoutingModeRule   = "rule"
+	RoutingModeDirect = "direct"
+
+	RoutingActionProxy  = "proxy"
+	RoutingActionDirect = "direct"
+	RoutingActionReject = "reject"
+)
 
 // GeoIPConfig controls GeoIP-based region routing.
 type GeoIPConfig struct {
@@ -242,6 +272,18 @@ func (c *Config) applyDefaults() error {
 	case "pool", "multi-port", "hybrid":
 	default:
 		return fmt.Errorf("unsupported mode %q (use 'pool', 'multi-port', or 'hybrid')", c.Mode)
+	}
+	if c.Routing.Mode == "" {
+		c.Routing.Mode = RoutingModeGlobal
+	}
+	c.Routing.Mode = strings.ToLower(strings.TrimSpace(c.Routing.Mode))
+	switch c.Routing.Mode {
+	case RoutingModeGlobal, RoutingModeRule, RoutingModeDirect:
+	default:
+		return fmt.Errorf("unsupported routing mode %q (use 'global', 'rule', or 'direct')", c.Routing.Mode)
+	}
+	if c.Routing.RuleSubscriptionID < 0 {
+		return errors.New("routing rule_subscription_id cannot be negative")
 	}
 	if c.Listener.Address == "" {
 		c.Listener.Address = "0.0.0.0"
@@ -674,7 +716,33 @@ func parseSubscriptionContent(content string) ([]NodeConfig, error) {
 // subscription payloads. It is shared by startup loading and refreshes so the
 // accepted formats remain consistent.
 func ParseSubscriptionContent(content string) ([]NodeConfig, error) {
-	return parseSubscriptionContent(content)
+	result, err := ParseSubscriptionBundle(content)
+	return result.Nodes, err
+}
+
+// SubscriptionBundle contains both proxy nodes and normalized routing rules.
+// Non-Clash subscriptions simply return an empty Rules slice.
+type SubscriptionBundle struct {
+	Nodes []NodeConfig
+	Rules []RoutingRule
+}
+
+// ParseSubscriptionBundle parses all supported subscription formats and also
+// extracts inline Clash rules when the provider returns a full Clash profile.
+func ParseSubscriptionBundle(content string) (SubscriptionBundle, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return SubscriptionBundle{}, nil
+	}
+	sampleSize := 4096
+	if len(trimmed) < sampleSize {
+		sampleSize = len(trimmed)
+	}
+	if strings.Contains(trimmed[:sampleSize], "proxies:") {
+		return parseClashBundle(trimmed)
+	}
+	nodes, err := parseSubscriptionContent(trimmed)
+	return SubscriptionBundle{Nodes: nodes}, err
 }
 
 // parseNodesFromContent parses nodes from plain text content (one URI per line)
@@ -745,6 +813,7 @@ func IsProxyURI(s string) bool {
 // clashConfig represents a minimal Clash configuration for parsing proxies
 type clashConfig struct {
 	Proxies []clashProxy `yaml:"proxies"`
+	Rules   []string     `yaml:"rules"`
 }
 
 type clashProxy struct {
@@ -787,9 +856,14 @@ type clashRealityOptions struct {
 
 // parseClashYAML parses Clash YAML format and converts to NodeConfig
 func parseClashYAML(content string) ([]NodeConfig, error) {
+	bundle, err := parseClashBundle(content)
+	return bundle.Nodes, err
+}
+
+func parseClashBundle(content string) (SubscriptionBundle, error) {
 	var clash clashConfig
 	if err := yaml.Unmarshal([]byte(content), &clash); err != nil {
-		return nil, fmt.Errorf("parse clash yaml: %w", err)
+		return SubscriptionBundle{}, fmt.Errorf("parse clash yaml: %w", err)
 	}
 
 	var nodes []NodeConfig
@@ -803,7 +877,69 @@ func parseClashYAML(content string) ([]NodeConfig, error) {
 		}
 	}
 
-	return nodes, nil
+	rules := make([]RoutingRule, 0, len(clash.Rules))
+	for _, raw := range clash.Rules {
+		if rule, ok := ParseClashRule(raw); ok {
+			rules = append(rules, rule)
+		}
+	}
+	return SubscriptionBundle{Nodes: nodes, Rules: rules}, nil
+}
+
+// ParseClashRule normalizes the Clash rule forms that can be represented by
+// sing-box without downloading an additional rule provider.
+func ParseClashRule(raw string) (RoutingRule, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "#") {
+		return RoutingRule{}, false
+	}
+	parts := strings.Split(raw, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	ruleType := strings.ToUpper(parts[0])
+	if ruleType == "FINAL" {
+		ruleType = "MATCH"
+	}
+	var value, target string
+	if ruleType == "MATCH" {
+		if len(parts) < 2 {
+			return RoutingRule{}, false
+		}
+		target = parts[1]
+	} else {
+		if len(parts) < 3 {
+			return RoutingRule{}, false
+		}
+		value, target = parts[1], parts[2]
+	}
+	supported := map[string]bool{
+		"DOMAIN": true, "DOMAIN-SUFFIX": true, "DOMAIN-KEYWORD": true,
+		"DOMAIN-REGEX": true, "IP-CIDR": true, "IP-CIDR6": true,
+		"SRC-IP-CIDR": true, "DST-PORT": true, "SRC-PORT": true,
+		"NETWORK": true, "PROCESS-NAME": true, "MATCH": true,
+	}
+	if !supported[ruleType] {
+		return RoutingRule{}, false
+	}
+	action := RoutingActionProxy
+	switch strings.ToUpper(target) {
+	case "DIRECT":
+		action = RoutingActionDirect
+	case "REJECT", "REJECT-DROP", "REJECT-TINYGIF", "REJECT-NO-DROP":
+		action = RoutingActionReject
+	}
+	noResolve := false
+	optionStart := 3
+	if ruleType == "MATCH" {
+		optionStart = 2
+	}
+	for _, part := range parts[optionStart:] {
+		if strings.EqualFold(part, "no-resolve") {
+			noResolve = true
+		}
+	}
+	return RoutingRule{Type: ruleType, Value: value, Action: action, NoResolve: noResolve, Raw: raw}, true
 }
 
 // convertClashProxyToURI converts a Clash proxy config to a standard URI
@@ -1018,8 +1154,16 @@ func (c *Config) Clone() *Config {
 	if c == nil {
 		return nil
 	}
-	cloned := *c
-	cloned.mu = sync.RWMutex{} // fresh mutex for the clone
+	cloned := Config{
+		Mode: c.Mode, Listener: c.Listener, MultiPort: c.MultiPort, Pool: c.Pool,
+		Routing: c.Routing, Management: c.Management, SubscriptionRefresh: c.SubscriptionRefresh,
+		GeoIP: c.GeoIP, NodesFile: c.NodesFile, ExternalIP: c.ExternalIP, LogLevel: c.LogLevel,
+		SkipCertVerify: c.SkipCertVerify, DatabasePath: c.DatabasePath, filePath: c.filePath,
+	}
+	if c.Management.Enabled != nil {
+		enabled := *c.Management.Enabled
+		cloned.Management.Enabled = &enabled
+	}
 
 	// Deep copy slices
 	if c.Nodes != nil {
@@ -1029,6 +1173,9 @@ func (c *Config) Clone() *Config {
 	if c.Subscriptions != nil {
 		cloned.Subscriptions = make([]string, len(c.Subscriptions))
 		copy(cloned.Subscriptions, c.Subscriptions)
+	}
+	if c.Routing.Rules != nil {
+		cloned.Routing.Rules = append([]RoutingRule(nil), c.Routing.Rules...)
 	}
 	return &cloned
 }
@@ -1096,8 +1243,10 @@ func (c *Config) SaveSettings() error {
 	// Multi-port
 	saveCfg.MultiPort = c.MultiPort
 
-	// Pool
+	// Pool and traffic routing
 	saveCfg.Pool = c.Pool
+	saveCfg.Routing = c.Routing
+	saveCfg.Routing.Rules = nil
 
 	// Management
 	saveCfg.Management = c.Management

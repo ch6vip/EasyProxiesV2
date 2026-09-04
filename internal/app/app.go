@@ -164,6 +164,16 @@ func loadNodesFromStore(ctx context.Context, cfg *config.Config, s store.Store) 
 		return fmt.Errorf("list effective subscription nodes: %w", err)
 	}
 
+	effectiveRules, err := s.ListEffectiveSubscriptionRules(ctx, cfg.Routing.RuleSubscriptionID)
+	if err != nil {
+		return fmt.Errorf("list effective subscription rules: %w", err)
+	}
+	cfg.Routing.Rules = make([]config.RoutingRule, 0, len(effectiveRules))
+	for _, rule := range effectiveRules {
+		cfg.Routing.Rules = append(cfg.Routing.Rules, config.RoutingRule{Type: rule.Type, Value: rule.Value,
+			Action: rule.Action, NoResolve: rule.NoResolve, Raw: rule.Raw})
+	}
+
 	// During the first v3 startup, legacy subscription nodes exist in the
 	// nodes table but no subscription membership has been imported yet. Keep
 	// the nodes fetched by config.Load for this one startup; SubscriptionManager

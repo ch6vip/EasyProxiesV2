@@ -278,6 +278,10 @@ type allSettingsResponse struct {
 	ExternalIP     string `json:"external_ip"`
 	SkipCertVerify bool   `json:"skip_cert_verify"`
 
+	// Traffic routing
+	RoutingMode               string `json:"routing_mode"`
+	RoutingRuleSubscriptionID int64  `json:"routing_rule_subscription_id"`
+
 	// Listener
 	ListenerAddress  string `json:"listener_address"`
 	ListenerPort     uint16 `json:"listener_port"`
@@ -336,6 +340,10 @@ type allSettingsRequest struct {
 	LogLevel       string `json:"log_level"`
 	ExternalIP     string `json:"external_ip"`
 	SkipCertVerify bool   `json:"skip_cert_verify"`
+
+	// Traffic routing
+	RoutingMode               string `json:"routing_mode"`
+	RoutingRuleSubscriptionID int64  `json:"routing_rule_subscription_id"`
 
 	// Listener
 	ListenerAddress  string `json:"listener_address"`
@@ -411,6 +419,9 @@ func (s *Server) getAllSettings() allSettingsResponse {
 		ExternalIP:     c.ExternalIP,
 		SkipCertVerify: c.SkipCertVerify,
 
+		RoutingMode:               c.Routing.Mode,
+		RoutingRuleSubscriptionID: c.Routing.RuleSubscriptionID,
+
 		ListenerAddress:  c.Listener.Address,
 		ListenerPort:     c.Listener.Port,
 		ListenerProtocol: c.Listener.Protocol,
@@ -462,6 +473,15 @@ func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) 
 	defer s.settingsMu.Unlock()
 
 	// Validate request before applying
+	switch req.RoutingMode {
+	case config.RoutingModeGlobal, config.RoutingModeRule, config.RoutingModeDirect:
+	default:
+		return SettingsUpdateResult{}, settingsValidationError{fmt.Errorf("参数验证失败: 不支持的代理规则模式 %q", req.RoutingMode)}
+	}
+	if req.RoutingRuleSubscriptionID < 0 {
+		return SettingsUpdateResult{}, settingsValidationError{errors.New("参数验证失败: 规则订阅 ID 不能为负数")}
+	}
+
 	if err := config.ValidateSettingsRequest(
 		req.Mode, req.ListenerPort, req.MultiPortBasePort,
 		req.ListenerProtocol, req.MultiPortProtocol,
@@ -508,6 +528,8 @@ func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) 
 	c.LogLevel = req.LogLevel
 	c.ExternalIP = strings.TrimSpace(req.ExternalIP)
 	c.SkipCertVerify = req.SkipCertVerify
+	c.Routing.Mode = req.RoutingMode
+	c.Routing.RuleSubscriptionID = req.RoutingRuleSubscriptionID
 
 	// Listener
 	c.Listener.Address = req.ListenerAddress

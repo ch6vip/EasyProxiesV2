@@ -358,8 +358,8 @@ func (m *Manager) refreshSubscription(ctx context.Context, sub *store.Subscripti
 		_, seconds := m.defaults()
 		timeout = time.Duration(seconds) * time.Second
 	}
-	nodes, etag, lastModified, err := m.fetchSubscription(ctx, sub.URL, timeout)
-	if err == nil && len(nodes) == 0 {
+	bundle, etag, lastModified, err := m.fetchSubscription(ctx, sub.URL, timeout)
+	if err == nil && len(bundle.Nodes) == 0 {
 		err = errors.New("订阅未返回有效节点")
 	}
 	if err != nil {
@@ -369,9 +369,9 @@ func (m *Manager) refreshSubscription(ctx context.Context, sub *store.Subscripti
 		}
 		return err
 	}
-	inputs := make([]store.SubscriptionNodeInput, 0, len(nodes))
-	seen := make(map[string]struct{}, len(nodes))
-	for i, n := range nodes {
+	inputs := make([]store.SubscriptionNodeInput, 0, len(bundle.Nodes))
+	seen := make(map[string]struct{}, len(bundle.Nodes))
+	for i, n := range bundle.Nodes {
 		uri := strings.TrimSpace(n.URI)
 		if _, ok := seen[uri]; ok {
 			continue
@@ -381,37 +381,66 @@ func (m *Manager) refreshSubscription(ctx context.Context, sub *store.Subscripti
 		inputs = append(inputs, store.SubscriptionNodeInput{URI: uri, Name: name, Port: n.Port,
 			Username: n.Username, Password: n.Password, Enabled: true})
 	}
-	return m.store.CommitSnapshot(ctx, sub.ID, inputs, store.SubscriptionSnapshot{
+	ruleInputs := make([]store.SubscriptionRuleInput, 0, len(bundle.Rules))
+	for _, rule := range bundle.Rules {
+		ruleInputs = append(ruleInputs, store.SubscriptionRuleInput{Type: rule.Type, Value: rule.Value,
+			Action: rule.Action, NoResolve: rule.NoResolve, Raw: rule.Raw})
+	}
+	return m.store.CommitSnapshotWithRules(ctx, sub.ID, inputs, ruleInputs, store.SubscriptionSnapshot{
 		Attempt: attempt, Success: time.Now().UTC(), ETag: etag, LastModified: lastModified,
 	})
 }
 
-func (m *Manager) fetchSubscription(parent context.Context, rawURL string, timeout time.Duration) ([]config.NodeConfig, string, string, error) {
+func (m *Manager) fetchSubscription(parent context.Context, rawURL string, timeout time.Duration) (config.SubscriptionBundle, string, string, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+
+	// Prefer a Clash-compatible profile because many providers include routing
+	// rules only for these clients. Fall back to the former browser identity so
+	// existing URI/Base64 subscriptions remain compatible.
+	bundle, etag, lastModified, err := m.fetchSubscriptionAs(ctx, rawURL, "Clash.Meta",
+		"application/yaml, text/yaml, text/plain, */*")
+	if err == nil && len(bundle.Nodes) > 0 {
+		return bundle, etag, lastModified, nil
+	}
+	fallback, fallbackETag, fallbackModified, fallbackErr := m.fetchSubscriptionAs(ctx, rawURL,
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "*/*")
+	if fallbackErr == nil && len(fallback.Nodes) > 0 {
+		return fallback, fallbackETag, fallbackModified, nil
+	}
+	if err != nil {
+		return config.SubscriptionBundle{}, "", "", errors.Join(err, fallbackErr)
+	}
+	if fallbackErr != nil {
+		return config.SubscriptionBundle{}, "", "", fallbackErr
+	}
+	return bundle, etag, lastModified, nil
+}
+
+func (m *Manager) fetchSubscriptionAs(ctx context.Context, rawURL, userAgent, accept string) (config.SubscriptionBundle, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("create request: %w", err)
+		return config.SubscriptionBundle{}, "", "", fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", accept)
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("fetch: %w", err)
+		return config.SubscriptionBundle{}, "", "", fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("status %d", resp.StatusCode)
+		return config.SubscriptionBundle{}, "", "", fmt.Errorf("status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024+1))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("read body: %w", err)
+		return config.SubscriptionBundle{}, "", "", fmt.Errorf("read body: %w", err)
 	}
 	if len(body) > 10*1024*1024 {
-		return nil, "", "", errors.New("subscription response exceeds 10MB")
+		return config.SubscriptionBundle{}, "", "", errors.New("subscription response exceeds 10MB")
 	}
-	nodes, err := config.ParseSubscriptionContent(string(body))
-	return nodes, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), err
+	bundle, err := config.ParseSubscriptionBundle(string(body))
+	return bundle, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), err
 }
 
 func (m *Manager) reconcileRuntime(ctx context.Context) error {
@@ -452,6 +481,15 @@ func (m *Manager) reconcileRuntime(ctx context.Context) error {
 	newCfg := m.baseCfg.Clone()
 	m.mu.RUnlock()
 	newCfg.Nodes = all
+	rules, err := m.store.ListEffectiveSubscriptionRules(ctx, newCfg.Routing.RuleSubscriptionID)
+	if err != nil {
+		return fmt.Errorf("list runtime subscription rules: %w", err)
+	}
+	newCfg.Routing.Rules = make([]config.RoutingRule, 0, len(rules))
+	for _, rule := range rules {
+		newCfg.Routing.Rules = append(newCfg.Routing.Rules, config.RoutingRule{Type: rule.Type, Value: rule.Value,
+			Action: rule.Action, NoResolve: rule.NoResolve, Raw: rule.Raw})
+	}
 	if err := m.boxMgr.ReloadWithPortMap(newCfg, m.boxMgr.CurrentPortMap()); err != nil {
 		return fmt.Errorf("reload runtime: %w", err)
 	}

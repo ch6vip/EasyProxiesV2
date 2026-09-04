@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import type { SettingsData } from '../types'
+import type { SettingsData, Subscription } from '../types'
 import {
   fetchSettings,
   fetchReloadStatus,
+  listSubscriptions,
   triggerReload,
   updateSettings,
 } from '../api/client'
@@ -26,6 +27,9 @@ const defaultSettings: SettingsData = {
   log_level: 'info',
   external_ip: '',
   skip_cert_verify: false,
+
+  routing_mode: 'global',
+  routing_rule_subscription_id: 0,
 
   listener_address: '0.0.0.0',
   listener_port: 2323,
@@ -86,14 +90,17 @@ export default function SettingsPanel() {
   const [applied, setApplied] = useState<string[]>([])
   const [pending, setPending] = useState<string[]>([])
   const [isDirty, setIsDirty] = useState(false)
+  const [ruleSubscriptions, setRuleSubscriptions] = useState<Subscription[]>([])
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [settingsData, reloadStatus] = await Promise.all([
+        const [settingsData, reloadStatus, subscriptionData] = await Promise.all([
           fetchSettings(),
           fetchReloadStatus().catch(() => null),
+          listSubscriptions().catch(() => ({ subscriptions: [] })),
         ])
+        setRuleSubscriptions(subscriptionData.subscriptions || [])
         const subscriptions = settingsData.subscriptions || []
         const merged = { ...defaultSettings, ...settingsData, subscriptions }
         setSettings(merged)
@@ -248,7 +255,7 @@ export default function SettingsPanel() {
     <PageLayout>
       <PageHeader
         title="系统设置"
-        description="管理系统所有配置项，修改后需保存生效"
+        description="按功能分区管理系统配置，修改后统一保存生效"
         icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -340,11 +347,11 @@ export default function SettingsPanel() {
         </div>
       )}
 
-      {/* Settings Cards Grid */}
-      <div className="grid items-start gap-5 lg:grid-cols-2 2xl:grid-cols-3">
+      {/* Unified settings surface, divided by function */}
+      <div className="panel-card mx-auto w-full max-w-6xl divide-y divide-base-200 overflow-hidden">
 
         {/* ===== 全局设置 ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-info/10 flex items-center justify-center text-info shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -409,10 +416,70 @@ export default function SettingsPanel() {
               onChange={(e) => updateField('skip_cert_verify', e.target.checked)}
             />
           </label>
-        </div>
+        </section>
+
+        {/* ===== 流量路由 ===== */}
+        <section className="space-y-5 p-5 lg:p-7">
+          <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l4-4 4 4m0 6l-4 4-4-4M3 5h9M12 19h9" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="font-bold text-lg text-base-content">代理规则</h3>
+              <p className="text-xs text-base-content/50 font-medium">控制共享 Pool 入口的流量走向</p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            {([
+              { value: 'global', title: '全局', desc: '所有流量使用代理池' },
+              { value: 'rule', title: '规则', desc: '按订阅规则自动分流' },
+              { value: 'direct', title: '直连', desc: '所有流量绕过代理池' },
+            ] as const).map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                className={`rounded-xl border p-4 text-left transition-all ${settings.routing_mode === item.value ? 'border-primary bg-primary/10 ring-1 ring-primary/20' : 'border-base-200 bg-base-200/30 hover:border-base-300'}`}
+                onClick={() => updateField('routing_mode', item.value)}
+              >
+                <span className={`block font-bold ${settings.routing_mode === item.value ? 'text-primary' : ''}`}>{item.title}</span>
+                <span className="mt-1 block text-xs text-base-content/50">{item.desc}</span>
+              </button>
+            ))}
+          </div>
+
+          {settings.routing_mode === 'rule' && (
+            <div className="space-y-3 rounded-xl border border-base-200 bg-base-200/20 p-4">
+              <fieldset className="fieldset">
+                <legend className="fieldset-legend font-semibold text-base-content/80">规则订阅来源</legend>
+                <select
+                  className="select select-md w-full bg-base-100"
+                  value={settings.routing_rule_subscription_id}
+                  onChange={(e) => updateField('routing_rule_subscription_id', Number(e.target.value))}
+                >
+                  <option value={0}>自动选择首个已启用且包含规则的订阅</option>
+                  {ruleSubscriptions.map((subscription) => (
+                    <option key={subscription.id} value={subscription.id} disabled={!subscription.enabled}>
+                      {subscription.name}（{subscription.rule_count || 0} 条规则{subscription.enabled ? '' : '，已禁用'}）
+                    </option>
+                  ))}
+                </select>
+                <p className="label text-base-content/50 mt-1">刷新订阅时使用 Clash.Meta 格式获取并保存规则；未匹配流量默认使用代理池。</p>
+              </fieldset>
+              {ruleSubscriptions.length === 0 && (
+                <div className="alert alert-warning alert-soft text-sm">暂无订阅，请先在「订阅管理」中添加并刷新订阅。</div>
+              )}
+              {settings.routing_rule_subscription_id > 0 && ruleSubscriptions.some((item) => item.id === settings.routing_rule_subscription_id && item.rule_count === 0) && (
+                <div className="alert alert-warning alert-soft text-sm">所选订阅尚未提取到规则，请刷新订阅后再使用规则模式。</div>
+              )}
+            </div>
+          )}
+        </section>
 
         {/* ===== 监听配置 (Pool 入口) ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center text-success shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -484,10 +551,10 @@ export default function SettingsPanel() {
               />
             </fieldset>
           </div>
-        </div>
+        </section>
 
         {/* ===== 多端口配置 ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-secondary/10 flex items-center justify-center text-secondary shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -559,10 +626,10 @@ export default function SettingsPanel() {
               />
             </fieldset>
           </div>
-        </div>
+        </section>
 
         {/* ===== 代理池配置 ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -656,10 +723,10 @@ export default function SettingsPanel() {
               <p className="label text-base-content/50 mt-1">使用最近多次探测平均值，降低单次抖动影响</p>
             </fieldset>
           </div>
-        </div>
+        </section>
 
         {/* ===== 管理面板 ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -728,10 +795,10 @@ export default function SettingsPanel() {
             />
             <p className="label text-base-content/50 mt-1">为空则不需要登录密码</p>
           </fieldset>
-        </div>
+        </section>
 
         {/* ===== GeoIP ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-info/10 flex items-center justify-center text-info shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -793,10 +860,10 @@ export default function SettingsPanel() {
               )}
             </div>
           )}
-        </div>
+        </section>
 
         {/* ===== 订阅刷新 ===== */}
-        <div className="panel-card space-y-5 p-5 transition-shadow hover:shadow-md lg:p-6">
+        <section className="space-y-5 p-5 lg:p-7">
           <div className="flex items-center gap-3 mb-2 border-b border-base-200 pb-4">
             <div className="w-10 h-10 rounded-xl bg-warning/10 flex items-center justify-center text-warning shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -880,7 +947,7 @@ export default function SettingsPanel() {
               </fieldset>
             </div>
           )}
-        </div>
+        </section>
 
       </div>
 

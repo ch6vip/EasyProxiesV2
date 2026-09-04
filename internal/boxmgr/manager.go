@@ -1060,6 +1060,16 @@ func (m *Manager) triggerReload(ctx context.Context) error {
 			return fmt.Errorf("list effective subscription nodes during reload: %w", err)
 		}
 
+		effectiveRules, err := m.store.ListEffectiveSubscriptionRules(ctx, newCfg.Routing.RuleSubscriptionID)
+		if err != nil {
+			return fmt.Errorf("list effective subscription rules during reload: %w", err)
+		}
+		newCfg.Routing.Rules = make([]config.RoutingRule, 0, len(effectiveRules))
+		for _, rule := range effectiveRules {
+			newCfg.Routing.Rules = append(newCfg.Routing.Rules, config.RoutingRule{Type: rule.Type, Value: rule.Value,
+				Action: rule.Action, NoResolve: rule.NoResolve, Raw: rule.Raw})
+		}
+
 		newCfg.Nodes = make([]config.NodeConfig, 0, len(regularNodes)+len(effectiveSubscriptionNodes))
 		seen := make(map[string]struct{}, len(regularNodes)+len(effectiveSubscriptionNodes))
 		appendNode := func(n store.Node) {

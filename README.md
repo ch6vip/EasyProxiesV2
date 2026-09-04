@@ -19,6 +19,7 @@ EasyProxiesV2 是一个轻量级、高性能的代理池与订阅管理工具，
 - 现代化 Web UI（React + Vite + Tailwind + DaisyUI）
 - 前后端一体化（前端静态资源已内嵌到 Go 二进制，单文件即可运行）
 - 节点订阅与自动刷新
+- 全局 / 规则 / 直连三种流量模式，支持从 Clash 订阅自动提取分流规则
 - 代理池智能调度与故障隔离
 - GeoIP 分区路由（可选）
 - SQLite 持久化存储运行状态与统计数据
@@ -106,6 +107,8 @@ cp ./config.example.yaml ./config.yaml
 - `management.listen`: Web 管理面板地址（默认 `0.0.0.0:9888`）
 - `management.password`: 面板登录密码（为空则不需要登录）
 - `subscriptions` / `nodes_file` / `nodes`: 节点来源（三选一或混用）
+- `routing.mode`: 共享代理入口的流量模式，可选 `global`、`rule`、`direct`
+- `routing.rule_subscription_id`: 规则来源订阅 ID，设为 `0` 时自动选择首个包含规则的已启用订阅
 
 ---
 

@@ -10,6 +10,18 @@
 # hybrid: 混合模式，同时启用 pool + multi-port
 mode: pool
 
+# ───────────────────────────────────────────────────────────────
+# 代理规则模式（作用于 pool / hybrid 的共享入口）
+# ───────────────────────────────────────────────────────────────
+# global: 全部流量走代理池
+# rule:   使用订阅中提取的 Clash 规则分流
+# direct: 全部流量直连
+routing:
+  mode: global
+  # 规则模式下指定规则来源订阅的数据库 ID；0 或省略表示自动选择
+  # 第一个已启用且包含规则的订阅。
+  rule_subscription_id: 0
+
 # 日志级别: debug, info, warn, error
 log_level: info
 

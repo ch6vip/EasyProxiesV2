@@ -86,6 +86,10 @@ export interface SettingsData {
   external_ip: string
   skip_cert_verify: boolean
 
+  // Traffic routing
+  routing_mode: 'global' | 'rule' | 'direct'
+  routing_rule_subscription_id: number
+
   // Listener
   listener_address: string
   listener_port: number
@@ -231,6 +235,7 @@ export interface Subscription {
   last_success: string
   last_error: string
   node_count: number
+  rule_count: number
   etag: string
   last_modified: string
   created_at: string

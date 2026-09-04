@@ -244,6 +244,18 @@ func Build(cfg *config.Config) (option.Options, error) {
 		}
 	}
 
+	// Apply traffic routing only to the shared pool listener. Dedicated
+	// multi-port inbounds continue to route to their corresponding node.
+	if enablePoolInbound {
+		routingRules, err := buildTrafficRoutingRules(cfg.Routing)
+		if err != nil {
+			return option.Options{}, err
+		}
+		if len(routingRules) > 0 {
+			route.Rules = append(routingRules, route.Rules...)
+		}
+	}
+
 	// Build GeoIP region-based pool outbounds and routing
 	if cfg.GeoIP.Enabled && enablePoolInbound {
 		// Create pool outbound for each region that has nodes
@@ -303,6 +315,80 @@ func Build(cfg *config.Config) (option.Options, error) {
 		Route:     &route,
 	}
 	return opts, nil
+}
+
+func buildTrafficRoutingRules(routing config.RoutingConfig) ([]option.Rule, error) {
+	inbound := badoption.Listable[string]{"http-in"}
+	switch routing.Mode {
+	case config.RoutingModeGlobal, "":
+		return nil, nil
+	case config.RoutingModeDirect:
+		return []option.Rule{newRouteRule(option.RawDefaultRule{Inbound: inbound}, config.RoutingActionDirect)}, nil
+	case config.RoutingModeRule:
+		rules := make([]option.Rule, 0, len(routing.Rules))
+		for _, source := range routing.Rules {
+			raw := option.RawDefaultRule{Inbound: inbound}
+			value := strings.TrimSpace(source.Value)
+			switch strings.ToUpper(source.Type) {
+			case "MATCH", "FINAL":
+			case "DOMAIN":
+				raw.Domain = badoption.Listable[string]{value}
+			case "DOMAIN-SUFFIX":
+				raw.DomainSuffix = badoption.Listable[string]{value}
+			case "DOMAIN-KEYWORD":
+				raw.DomainKeyword = badoption.Listable[string]{value}
+			case "DOMAIN-REGEX":
+				raw.DomainRegex = badoption.Listable[string]{value}
+			case "IP-CIDR", "IP-CIDR6":
+				raw.IPCIDR = badoption.Listable[string]{value}
+			case "SRC-IP-CIDR":
+				raw.SourceIPCIDR = badoption.Listable[string]{value}
+			case "DST-PORT":
+				if strings.Contains(value, "-") {
+					raw.PortRange = badoption.Listable[string]{value}
+				} else if port, err := strconv.ParseUint(value, 10, 16); err == nil && port > 0 {
+					raw.Port = badoption.Listable[uint16]{uint16(port)}
+				} else {
+					continue
+				}
+			case "SRC-PORT":
+				if strings.Contains(value, "-") {
+					raw.SourcePortRange = badoption.Listable[string]{value}
+				} else if port, err := strconv.ParseUint(value, 10, 16); err == nil && port > 0 {
+					raw.SourcePort = badoption.Listable[uint16]{uint16(port)}
+				} else {
+					continue
+				}
+			case "NETWORK":
+				raw.Network = badoption.Listable[string]{strings.ToLower(value)}
+			case "PROCESS-NAME":
+				raw.ProcessName = badoption.Listable[string]{value}
+			default:
+				continue
+			}
+			rules = append(rules, newRouteRule(raw, source.Action))
+		}
+		return rules, nil
+	default:
+		return nil, fmt.Errorf("unsupported routing mode %q", routing.Mode)
+	}
+}
+
+func newRouteRule(raw option.RawDefaultRule, action string) option.Rule {
+	ruleAction := option.RuleAction{}
+	switch action {
+	case config.RoutingActionDirect:
+		ruleAction.Action = C.RuleActionTypeDirect
+	case config.RoutingActionReject:
+		ruleAction.Action = C.RuleActionTypeReject
+	default:
+		ruleAction.Action = C.RuleActionTypeRoute
+		ruleAction.RouteOptions.Outbound = poolout.Tag
+	}
+	return option.Rule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{
+		RawDefaultRule: raw,
+		RuleAction:     ruleAction,
+	}}
 }
 
 func buildPoolInbound(cfg *config.Config) (option.Inbound, error) {

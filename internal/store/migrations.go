@@ -139,6 +139,27 @@ CREATE INDEX idx_subscription_nodes_node ON subscription_nodes(node_id);
 CREATE INDEX idx_subscription_nodes_subscription_position ON subscription_nodes(subscription_id, position);
 `,
 		},
+		{
+			Version:     4,
+			Description: "add subscription routing rules",
+			Up: `
+ALTER TABLE subscriptions ADD COLUMN rule_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE subscription_rules (
+    subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    position        INTEGER NOT NULL DEFAULT 0,
+    rule_type       TEXT    NOT NULL,
+    value           TEXT    NOT NULL DEFAULT '',
+    action          TEXT    NOT NULL,
+    no_resolve      INTEGER NOT NULL DEFAULT 0,
+    raw             TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (subscription_id, position)
+);
+
+CREATE INDEX idx_subscription_rules_subscription_position
+    ON subscription_rules(subscription_id, position);
+`,
+		},
 	}
 }
 
