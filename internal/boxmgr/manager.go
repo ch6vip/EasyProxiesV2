@@ -676,7 +676,7 @@ func managedNodeConfig(node config.NodeConfig, subscriptionIDs []int64) monitor.
 	if subscriptionIDs == nil {
 		subscriptionIDs = []int64{}
 	}
-	return monitor.ManagedNodeConfig{Name: node.Name, URI: node.URI, Port: node.Port,
+	return monitor.ManagedNodeConfig{ID: node.ConfigID, Name: node.Name, URI: node.URI, Port: node.Port,
 		Username: node.Username, Password: node.Password, Source: node.Source,
 		Disabled: node.Disabled, SubscriptionIDs: subscriptionIDs}
 }
@@ -1071,7 +1071,7 @@ func (m *Manager) triggerReload(ctx context.Context) error {
 			}
 			seen[n.URI] = struct{}{}
 			newCfg.Nodes = append(newCfg.Nodes, config.NodeConfig{
-				Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
+				ConfigID: n.ID, Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
 				Password: n.Password, Source: config.NodeSource(n.Source),
 			})
 		}
@@ -1087,7 +1087,7 @@ func (m *Manager) triggerReload(ctx context.Context) error {
 			}
 			seen[n.URI] = struct{}{}
 			newCfg.Nodes = append(newCfg.Nodes, config.NodeConfig{
-				Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
+				ConfigID: n.ID, Name: n.Name, URI: n.URI, Port: n.Port, Username: n.Username,
 				Password: n.Password, Source: config.NodeSource(n.Source),
 			})
 		}

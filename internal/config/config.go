@@ -149,6 +149,7 @@ func NormalizeInboundProtocol(value string) (string, error) {
 
 // NodeConfig describes a single upstream proxy endpoint expressed as URI.
 type NodeConfig struct {
+	ConfigID int64      `yaml:"-" json:"config_id,omitempty"`
 	Name     string     `yaml:"name" json:"name"`
 	URI      string     `yaml:"uri" json:"uri"`
 	Port     uint16     `yaml:"port,omitempty" json:"port,omitempty"`

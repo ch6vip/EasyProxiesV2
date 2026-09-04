@@ -12,7 +12,7 @@ func TestTrafficSummaryIncludesRealtimeNodeState(t *testing.T) {
 	}
 	defer mgr.Stop()
 
-	handle := mgr.Register(NodeInfo{Tag: "node-1", Name: "Node 1"})
+	handle := mgr.Register(NodeInfo{ConfigID: 42, Tag: "node-1", Name: "Node 1"})
 	handle.MarkInitialCheckDone(true)
 	handle.RecordSuccessWithLatency(25 * time.Millisecond)
 	handle.IncActive()
@@ -26,6 +26,9 @@ func TestTrafficSummaryIncludesRealtimeNodeState(t *testing.T) {
 	node := summary.Nodes[0]
 	if node.Tag != "node-1" {
 		t.Fatalf("node tag = %q, want node-1", node.Tag)
+	}
+	if node.ConfigID != 42 {
+		t.Fatalf("config ID = %d, want 42", node.ConfigID)
 	}
 	if !node.InitialCheckDone || !node.Available {
 		t.Fatalf("unexpected health state: %+v", node)

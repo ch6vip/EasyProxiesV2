@@ -1,26 +1,18 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import type { ConfigNodeConfig, ConfigNodeMutationResponse, ConfigNodePayload, NodeSnapshot, NodesResponse, Subscription } from '../types'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import type { ConfigNodeConfig, ConfigNodeMutationResponse, ConfigNodePayload, NodesResponse, Subscription, TrafficStreamEvent } from '../types'
 import {
   fetchConfigNodes, createConfigNode, updateConfigNode, deleteConfigNode,
   toggleConfigNode, batchToggleConfigNodes, batchDeleteConfigNodes, triggerReload,
   importNodes, exportProxies,
-  fetchNodes, probeNode, releaseNode, listSubscriptions, fetchReloadStatus,
+  fetchNodes, probeNode, releaseNode, listSubscriptions, fetchReloadStatus, streamTraffic,
 } from '../api/client'
 import type { ConfigNodeRef } from '../api/client'
 import { PageContent, PageHeader, PageLayout } from './ui/PageLayout'
+import { buildNodeOverview, mergeTrafficEvent, summarizeNodeOverview } from '../utils/nodeOverview'
+import type { NodeOverview } from '../utils/nodeOverview'
 
-// ---- Merged node type ----
-interface MergedNode extends ConfigNodeConfig {
-  // Runtime state from monitor
-  runtimeStatus: 'normal' | 'unavailable' | 'blacklisted' | 'pending' | 'disabled'
-  latency_ms: number
-  region?: string
-  country?: string
-  active_connections: number
-  success_count: number
-  failure_count: number
-  tag?: string
-}
+// ---- Shared config/runtime node view ----
+type MergedNode = NodeOverview
 
 function nodeKey(node: MergedNode): string {
   return node.id && node.id > 0 ? `id:${node.id}` : `name:${node.name}`
@@ -148,6 +140,8 @@ export default function ManagePanel() {
   const [reloading, setReloading] = useState(false)
   const [reloadWarning, setReloadWarning] = useState('')
   const [reloadId, setReloadId] = useState<string | null>(null)
+  const loadInFlightRef = useRef<Promise<void> | null>(null)
+  const trafficAbortRef = useRef<AbortController | null>(null)
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false)
@@ -193,35 +187,94 @@ export default function ManagePanel() {
   // ---- Data loading ----
 
   const loadData = useCallback(async () => {
-    try {
-      setError('')
-      const [configRes, monitorRes, subscriptionsRes, reloadStatus] = await Promise.all([
-        fetchConfigNodes(),
-        fetchNodes().catch(() => null), // monitor data is optional
-        listSubscriptions(),
-        fetchReloadStatus().catch(() => null),
-      ])
-      setConfigNodes(configRes.nodes || [])
-      setSubscriptions(subscriptionsRes.subscriptions || [])
-      if (monitorRes) setMonitorData(monitorRes)
-      if (reloadStatus?.reload_id && (reloadStatus.reload_state === 'queued' || reloadStatus.reload_state === 'running')) {
-        setReloadId(reloadStatus.reload_id)
-        setReloading(true)
-        setNeedReload(true)
-      } else if (reloadStatus?.reload_state === 'failed') {
-        setReloadWarning(`自动重载失败：${reloadStatus.reload_error || '未知错误'}`)
-        setNeedReload(true)
+    if (loadInFlightRef.current) return loadInFlightRef.current
+
+    const request = (async () => {
+      try {
+        setError('')
+        const [configRes, monitorResult, subscriptionsRes, reloadStatus] = await Promise.all([
+          fetchConfigNodes(),
+          fetchNodes()
+            .then((data) => ({ data, error: null as Error | null }))
+            .catch((err: unknown) => ({ data: null, error: err instanceof Error ? err : new Error('运行时状态加载失败') })),
+          listSubscriptions(),
+          fetchReloadStatus().catch(() => null),
+        ])
+        setConfigNodes(configRes.nodes || [])
+        setSubscriptions(subscriptionsRes.subscriptions || [])
+        if (monitorResult.data) {
+          setMonitorData(monitorResult.data)
+        } else {
+          setMonitorData(null)
+          setError(`运行时状态加载失败：${monitorResult.error?.message || '未知错误'}`)
+        }
+        if (reloadStatus?.reload_id && (reloadStatus.reload_state === 'queued' || reloadStatus.reload_state === 'running')) {
+          setReloadId(reloadStatus.reload_id)
+          setReloading(true)
+          setNeedReload(true)
+        } else if (reloadStatus?.reload_state === 'failed') {
+          setReloadWarning(`自动重载失败：${reloadStatus.reload_error || '未知错误'}`)
+          setNeedReload(true)
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '加载节点失败')
+      } finally {
+        setLoading(false)
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载节点失败')
+    })()
+
+    loadInFlightRef.current = request
+    try {
+      await request
     } finally {
-      setLoading(false)
+      if (loadInFlightRef.current === request) loadInFlightRef.current = null
     }
   }, [])
 
   useEffect(() => {
     const timer = setTimeout(() => void loadData(), 0)
     return () => clearTimeout(timer)
+  }, [loadData])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadData(), 30_000)
+    return () => window.clearInterval(timer)
+  }, [loadData])
+
+  useEffect(() => {
+    let stopped = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+
+    const connect = () => {
+      if (stopped || document.visibilityState !== 'visible') return
+      trafficAbortRef.current?.abort()
+      trafficAbortRef.current = streamTraffic(
+        (event: TrafficStreamEvent) => setMonitorData((current) => mergeTrafficEvent(current, event)),
+        () => {
+          if (!stopped) retryTimer = setTimeout(connect, 2000)
+        },
+      )
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        trafficAbortRef.current?.abort()
+        trafficAbortRef.current = null
+      } else {
+        void loadData()
+        connect()
+      }
+    }
+
+    connect()
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      stopped = true
+      if (retryTimer) clearTimeout(retryTimer)
+      trafficAbortRef.current?.abort()
+      trafficAbortRef.current = null
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
   }, [loadData])
 
   useEffect(() => {
@@ -277,70 +330,12 @@ export default function ManagePanel() {
 
   // ---- Merge config + monitor data ----
 
-  const mergedNodes = useMemo((): MergedNode[] => {
-    const snapshots = monitorData?.nodes || []
-    const snapByURI = new Map<string, NodeSnapshot>()
-    const snapByName = new Map<string, NodeSnapshot>()
-    for (const s of snapshots) {
-      if (s.uri) snapByURI.set(s.uri, s)
-      snapByName.set(s.name, s)
-    }
-
-    return configNodes.map((cfg): MergedNode => {
-      const snap = snapByURI.get(cfg.uri) || snapByName.get(cfg.name)
-
-      if (cfg.disabled) {
-        return {
-          ...cfg,
-          runtimeStatus: 'disabled',
-          latency_ms: -1,
-          region: undefined,
-          country: undefined,
-          active_connections: 0,
-          success_count: 0,
-          failure_count: 0,
-          tag: undefined,
-        }
-      }
-
-      if (!snap) {
-        return {
-          ...cfg,
-          runtimeStatus: 'pending',
-          latency_ms: -1,
-          region: undefined,
-          country: undefined,
-          active_connections: 0,
-          success_count: 0,
-          failure_count: 0,
-          tag: undefined,
-        }
-      }
-
-      let runtimeStatus: MergedNode['runtimeStatus'] = 'pending'
-      if (snap.blacklisted) {
-        runtimeStatus = 'blacklisted'
-      } else if (!snap.initial_check_done) {
-        runtimeStatus = 'pending'
-      } else if (snap.available) {
-        runtimeStatus = 'normal'
-      } else {
-        runtimeStatus = 'unavailable'
-      }
-
-      return {
-        ...cfg,
-        runtimeStatus,
-        latency_ms: snap.last_latency_ms,
-        region: snap.region,
-        country: snap.country,
-        active_connections: snap.active_connections,
-        success_count: typeof snap.success_count === 'number' ? snap.success_count : 0,
-        failure_count: snap.failure_count,
-        tag: snap.tag,
-      }
-    })
-  }, [configNodes, monitorData])
+  const overview = useMemo(
+    () => buildNodeOverview(configNodes, monitorData?.nodes || []),
+    [configNodes, monitorData],
+  )
+  const mergedNodes = overview.nodes
+  const nodeStats = useMemo(() => summarizeNodeOverview(mergedNodes), [mergedNodes])
 
   // ---- Filtering ----
 
@@ -706,9 +701,11 @@ export default function ManagePanel() {
   }
 
   // ---- Stats ----
-  const disabledCount = mergedNodes.filter(n => n.runtimeStatus === 'disabled').length
-  const blacklistedCount = mergedNodes.filter(n => n.runtimeStatus === 'blacklisted').length
-  const normalCount = mergedNodes.filter(n => n.runtimeStatus === 'normal').length
+  const disabledCount = nodeStats.disabled
+  const blacklistedCount = nodeStats.blacklisted
+  const normalCount = nodeStats.normal
+  const unavailableCount = nodeStats.unavailable
+  const pendingCount = nodeStats.pending
 
   // ---- Render ----
 
@@ -729,8 +726,11 @@ export default function ManagePanel() {
         description={<div className="flex flex-wrap items-center gap-2 font-medium">
               <span>共 <strong className="text-base-content/80">{mergedNodes.length}</strong> 个节点</span>
               {normalCount > 0 && <span className="badge badge-success badge-xs border-none bg-success/15 text-success">正常 {normalCount}</span>}
+              {unavailableCount > 0 && <span className="badge badge-error badge-xs border-none bg-error/15 text-error">不可用 {unavailableCount}</span>}
               {blacklistedCount > 0 && <span className="badge badge-error badge-xs border-none bg-error/15 text-error">黑名单 {blacklistedCount}</span>}
+              {pendingCount > 0 && <span className="badge badge-warning badge-xs border-none bg-warning/15 text-warning-content">待检查 {pendingCount}</span>}
               {disabledCount > 0 && <span className="badge badge-ghost badge-xs bg-base-200 text-base-content/50">禁用 {disabledCount}</span>}
+              {overview.unmatchedRuntimeCount > 0 && <span className="badge badge-info badge-xs border-none bg-info/15 text-info">运行时待同步 {overview.unmatchedRuntimeCount}</span>}
             </div>}
         icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 10h16M4 14h16M4 18h16" />

@@ -54,6 +54,7 @@ type Options struct {
 
 // MemberMeta carries optional descriptive information for monitoring UI.
 type MemberMeta struct {
+	ConfigID      int64
 	Name          string
 	URI           string
 	Mode          string
@@ -127,6 +128,7 @@ func newPool(ctx context.Context, _ adapter.Router, logger log.ContextLogger, ta
 
 			meta := normalized.Metadata[memberTag]
 			info := monitor.NodeInfo{
+				ConfigID:      meta.ConfigID,
 				Tag:           memberTag,
 				Name:          meta.Name,
 				URI:           meta.URI,
@@ -294,6 +296,7 @@ func (p *poolOutbound) initializeMembersLocked() error {
 		if p.monitor != nil {
 			meta := p.options.Metadata[tag]
 			info := monitor.NodeInfo{
+				ConfigID:      meta.ConfigID,
 				Tag:           tag,
 				Name:          meta.Name,
 				URI:           meta.URI,

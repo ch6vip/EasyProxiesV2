@@ -30,6 +30,7 @@ type Config struct {
 
 // NodeInfo is static metadata about a proxy entry.
 type NodeInfo struct {
+	ConfigID      int64  `json:"config_id,omitempty"`
 	Tag           string `json:"tag"`
 	Name          string `json:"name"`
 	URI           string `json:"uri"`
@@ -81,6 +82,7 @@ type Snapshot struct {
 }
 
 type NodeTrafficSpeed struct {
+	ConfigID          int64     `json:"config_id,omitempty"`
 	Tag               string    `json:"tag"`
 	UploadSpeed       int64     `json:"upload_speed"`   // bytes/sec
 	DownloadSpeed     int64     `json:"download_speed"` // bytes/sec
@@ -616,6 +618,7 @@ func (m *Manager) TrafficSummary(includeNodes bool) TrafficSummary {
 		upSpeed := e.uploadSpeed
 		downSpeed := e.downloadSpeed
 		tag := e.info.Tag
+		configID := e.info.ConfigID
 		latencyMs := int64(-1)
 		if e.lastProbe > 0 {
 			latencyMs = e.lastProbe.Milliseconds()
@@ -624,6 +627,7 @@ func (m *Manager) TrafficSummary(includeNodes bool) TrafficSummary {
 			}
 		}
 		node := NodeTrafficSpeed{
+			ConfigID:          configID,
 			Tag:               tag,
 			UploadSpeed:       upSpeed,
 			DownloadSpeed:     downSpeed,

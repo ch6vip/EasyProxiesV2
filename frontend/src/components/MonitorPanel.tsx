@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import type { NodeSnapshot, NodesResponse, ConfigNodeConfig, ConfigNodesResponse, TrafficStreamEvent } from '../types'
+import type { NodesResponse, ConfigNodesResponse, TrafficStreamEvent } from '../types'
 import { fetchNodes, fetchConfigNodes, streamTraffic } from '../api/client'
 import { formatBytes, formatSpeed } from '../utils/format'
+import { buildNodeOverview, mergeTrafficEvent, summarizeNodeOverview } from '../utils/nodeOverview'
 import DonutChart from './charts/DonutChart'
 import BarChart from './charts/BarChart'
 import LatencyRanking from './charts/LatencyRanking'
@@ -17,44 +18,6 @@ function latencyColor(ms: number): string {
 }
 
 type AutoRefreshInterval = 0 | 15 | 30 | 60
-
-function mergeTrafficEvent(current: NodesResponse | null, event: TrafficStreamEvent): NodesResponse | null {
-  if (!current) return current
-
-  const realtimeNodes = new Map(event.nodes.map((node) => [node.tag, node]))
-  const nodes = current.nodes.map((node) => {
-    const realtime = realtimeNodes.get(node.tag)
-    if (!realtime) return node
-
-    return {
-      ...node,
-      total_upload: realtime.total_upload,
-      total_download: realtime.total_download,
-      active_connections: realtime.active_connections,
-      failure_count: realtime.failure_count,
-      success_count: realtime.success_count,
-      blacklisted: realtime.blacklisted,
-      blacklisted_until: realtime.blacklisted_until,
-      last_error: realtime.last_error,
-      last_failure: realtime.last_failure,
-      last_success: realtime.last_success,
-      last_latency_ms: realtime.last_latency_ms,
-      available: realtime.available,
-      initial_check_done: realtime.initial_check_done,
-    }
-  })
-
-  return {
-    ...current,
-    nodes,
-    total_nodes: event.node_count,
-    total_upload: event.total_upload,
-    total_download: event.total_download,
-    upload_speed: event.upload_speed,
-    download_speed: event.download_speed,
-    traffic_sampled: event.sampled_at,
-  }
-}
 
 export default function MonitorPanel() {
   const [data, setData] = useState<NodesResponse | null>(null)
@@ -143,7 +106,7 @@ export default function MonitorPanel() {
     const schedule = () => {
       timer = setTimeout(async () => {
         if (!stopped && document.visibilityState === 'visible') {
-          await loadMonitorData()
+          await Promise.all([loadMonitorData(), loadConfigData()])
         }
         if (!stopped) schedule()
       }, autoRefresh * 1000)
@@ -151,7 +114,7 @@ export default function MonitorPanel() {
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        void loadMonitorData()
+        void Promise.all([loadMonitorData(), loadConfigData()])
       }
     }
 
@@ -162,7 +125,7 @@ export default function MonitorPanel() {
       if (timer) clearTimeout(timer)
       document.removeEventListener('visibilitychange', handleVisibility)
     }
-  }, [autoRefresh, loadMonitorData])
+  }, [autoRefresh, loadConfigData, loadMonitorData])
 
   const handleRefresh = async () => {
     setLoading(true)
@@ -273,53 +236,38 @@ export default function MonitorPanel() {
   }, [loadConfigData, loadMonitorData])
 
   // ---- Computed stats ----
-  const allNodes = useMemo(() => data?.nodes || [], [data])
+  const runtimeNodes = useMemo(() => data?.nodes || [], [data])
   const allConfigNodes = useMemo(() => configData?.nodes || [], [configData])
-
-  // Config-level counts (includes disabled nodes)
-  const totalConfigNodes = configData ? allConfigNodes.length : (data?.total_nodes || allNodes.length)
-  const disabledNodes = useMemo(
-    () => allConfigNodes.filter((n: ConfigNodeConfig) => n.disabled).length,
-    [allConfigNodes]
+  const overview = useMemo(
+    () => buildNodeOverview(configData ? allConfigNodes : null, runtimeNodes),
+    [allConfigNodes, configData, runtimeNodes],
   )
-  // enabledConfigNodes not directly displayed but used implicitly in monitor node count
-
-  // Runtime monitor counts (only enabled nodes that are loaded in the box)
-  const availableNodes = useMemo(
-    () => allNodes.filter((n: NodeSnapshot) => n.initial_check_done && n.available && !n.blacklisted).length,
-    [allNodes]
+  const allNodes = overview.nodes
+  const runtimeNodesInConfig = useMemo(
+    () => allNodes.filter((node) => node.runtimePresent && node.runtimeIdentityMatches),
+    [allNodes],
   )
+  const nodeStats = useMemo(() => summarizeNodeOverview(allNodes), [allNodes])
 
-  const unavailableNodes = useMemo(
-    () => allNodes.filter((n: NodeSnapshot) => n.initial_check_done && !n.available && !n.blacklisted).length,
-    [allNodes]
-  )
-
-  const blacklistedNodes = useMemo(
-    () => allNodes.filter((n: NodeSnapshot) => n.blacklisted).length,
-    [allNodes]
-  )
-
-  const pendingNodes = useMemo(
-    () => allNodes.filter((n: NodeSnapshot) => !n.initial_check_done && !n.blacklisted).length,
-    [allNodes]
-  )
-
-  const healthRate = useMemo(() => {
-    const checked = allNodes.filter((n: NodeSnapshot) => n.initial_check_done).length
-    if (checked === 0) return -1
-    return Math.round((availableNodes / checked) * 100)
-  }, [allNodes, availableNodes])
+  // Both monitor and management pages now classify the same config-oriented
+  // node overview, so every configured node belongs to exactly one state.
+  const totalConfigNodes = nodeStats.total
+  const disabledNodes = nodeStats.disabled
+  const availableNodes = nodeStats.normal
+  const unavailableNodes = nodeStats.unavailable
+  const blacklistedNodes = nodeStats.blacklisted
+  const pendingNodes = nodeStats.pending
+  const healthRate = nodeStats.healthRate
 
   const avgLatency = useMemo(() => {
-    const validNodes = allNodes.filter((n: NodeSnapshot) => n.last_latency_ms > 0)
+    const validNodes = runtimeNodesInConfig.filter((n) => n.last_latency_ms > 0)
     if (validNodes.length === 0) return -1
-    return Math.round(validNodes.reduce((sum: number, n: NodeSnapshot) => sum + n.last_latency_ms, 0) / validNodes.length)
-  }, [allNodes])
+    return Math.round(validNodes.reduce((sum, n) => sum + n.last_latency_ms, 0) / validNodes.length)
+  }, [runtimeNodesInConfig])
 
   const totalConnections = useMemo(
-    () => allNodes.reduce((sum: number, n: NodeSnapshot) => sum + n.active_connections, 0),
-    [allNodes]
+    () => runtimeNodesInConfig.reduce((sum, n) => sum + n.active_connections, 0),
+    [runtimeNodesInConfig]
   )
 
   // Traffic totals
@@ -355,7 +303,7 @@ export default function MonitorPanel() {
       { label: '300+', min: 300, max: Infinity, count: 0, color: 'oklch(0.63 0.24 29)' },
       { label: '超时', min: -1, max: 0, count: 0, color: 'oklch(0.50 0.10 250)' },
     ]
-    for (const node of allNodes) {
+    for (const node of runtimeNodesInConfig) {
       const ms = node.last_latency_ms
       if (ms < 0 || !node.initial_check_done) {
         buckets[5].count++
@@ -372,37 +320,37 @@ export default function MonitorPanel() {
       }
     }
     return buckets.map(b => ({ label: b.label, value: b.count, color: b.color }))
-  }, [allNodes])
+  }, [runtimeNodesInConfig])
 
   // Latency ranking
   const rankingItems = useMemo(() =>
-    allNodes
-      .filter((n: NodeSnapshot) => n.last_latency_ms > 0)
-      .map((n: NodeSnapshot) => ({
-        name: n.name || n.tag,
+    runtimeNodesInConfig
+      .filter((n) => n.last_latency_ms > 0)
+      .map((n) => ({
+        name: n.name || n.tag || '未命名节点',
         latency: n.last_latency_ms,
         region: n.region,
       })),
-    [allNodes]
+    [runtimeNodesInConfig]
   )
 
   // Traffic ranking
   const trafficRankItems = useMemo(() =>
-    allNodes
-      .filter((n: NodeSnapshot) => (n.total_upload || 0) + (n.total_download || 0) > 0)
-      .map((n: NodeSnapshot) => ({
-        name: n.name || n.tag,
+    runtimeNodesInConfig
+      .filter((n) => (n.total_upload || 0) + (n.total_download || 0) > 0)
+      .map((n) => ({
+        name: n.name || n.tag || '未命名节点',
         upload: n.total_upload || 0,
         download: n.total_download || 0,
         region: n.region,
       })),
-    [allNodes]
+    [runtimeNodesInConfig]
   )
 
   // Region stats
   const regionStats = useMemo(() => {
     const map = new Map<string, { total: number; healthy: number; latencies: number[] }>()
-    for (const node of allNodes) {
+    for (const node of runtimeNodesInConfig) {
       const region = node.region || 'other'
       const entry = map.get(region) || { total: 0, healthy: 0, latencies: [] }
       entry.total++
@@ -422,7 +370,7 @@ export default function MonitorPanel() {
         ? Math.round(stats.latencies.reduce((a, b) => a + b, 0) / stats.latencies.length)
         : 0,
     }))
-  }, [allNodes])
+  }, [runtimeNodesInConfig])
 
   // ---- Render ----
 
@@ -496,7 +444,7 @@ export default function MonitorPanel() {
           </div>
           <div className="text-3xl font-black tabular-nums tracking-tight text-base-content mb-2 relative z-10">{totalConfigNodes}</div>
           <div className="text-xs flex flex-wrap gap-1.5 relative z-10">
-            <span className="badge badge-success badge-sm badge-outline border-success/30 bg-success/5 font-medium">可用 {availableNodes}</span>
+            <span className="badge badge-success badge-sm badge-outline border-success/30 bg-success/5 font-medium">正常 {availableNodes}</span>
             {unavailableNodes > 0 && <span className="badge badge-error badge-sm badge-outline border-error/30 bg-error/5 font-medium">不可用 {unavailableNodes}</span>}
             {blacklistedNodes > 0 && <span className="badge badge-error badge-sm badge-outline border-error/30 bg-error/5 font-medium">黑名单 {blacklistedNodes}</span>}
             {pendingNodes > 0 && <span className="badge badge-warning badge-sm badge-outline border-warning/30 bg-warning/5 font-medium">待检查 {pendingNodes}</span>}
@@ -521,7 +469,7 @@ export default function MonitorPanel() {
             {healthRate >= 0 ? `${healthRate}%` : '-'}
           </div>
           <div className="text-xs font-medium text-base-content/40 relative z-10 bg-base-200/50 w-fit px-2 py-1 rounded-md">
-            {healthRate >= 0 ? `${availableNodes} / ${availableNodes + unavailableNodes} 已检查` : '等待检查'}
+            {healthRate >= 0 ? `${availableNodes} / ${nodeStats.checked} 已检查` : '等待检查'}
           </div>
         </div>
 
@@ -538,7 +486,7 @@ export default function MonitorPanel() {
             {avgLatency > 0 ? `${avgLatency}ms` : '-'}
           </div>
           <div className="text-xs font-medium text-base-content/40 relative z-10 bg-base-200/50 w-fit px-2 py-1 rounded-md">
-            {allNodes.filter(n => n.last_latency_ms > 0).length} 个节点有数据
+            {runtimeNodesInConfig.filter(n => n.last_latency_ms > 0).length} 个节点有数据
           </div>
         </div>
 
@@ -677,9 +625,10 @@ export default function MonitorPanel() {
         {data && (
           <>
             共 {totalConfigNodes} 个节点 ·
-            {Object.keys(data.region_stats || {}).length} 个地区 ·
-            数据来自运行时监控
+            {regionStats.length} 个地区 ·
+            配置与运行时状态已统一
             {autoRefresh > 0 && ` · 每 ${autoRefresh} 秒完整校准`}
+            {overview.unmatchedRuntimeCount > 0 && ` · ${overview.unmatchedRuntimeCount} 个运行时节点待清理`}
             {trafficRealtime.connected ? ' · 实时流已连接' : ' · 实时流重连中'}
             {trafficRealtime.sampledAt && ` · 更新于 ${new Date(trafficRealtime.sampledAt).toLocaleTimeString()}`}
           </>

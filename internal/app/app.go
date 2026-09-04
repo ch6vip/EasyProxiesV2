@@ -198,6 +198,7 @@ func loadNodesFromStore(ctx context.Context, cfg *config.Config, s store.Store) 
 		}
 		seen[n.URI] = struct{}{}
 		configNodes = append(configNodes, config.NodeConfig{
+			ConfigID: n.ID,
 			Name:     n.Name,
 			URI:      n.URI,
 			Port:     n.Port,
@@ -211,7 +212,7 @@ func loadNodesFromStore(ctx context.Context, cfg *config.Config, s store.Store) 
 			continue
 		}
 		seen[n.URI] = struct{}{}
-		configNodes = append(configNodes, config.NodeConfig{Name: n.Name, URI: n.URI, Port: n.Port,
+		configNodes = append(configNodes, config.NodeConfig{ConfigID: n.ID, Name: n.Name, URI: n.URI, Port: n.Port,
 			Username: n.Username, Password: n.Password, Source: config.NodeSourceSubscription})
 	}
 

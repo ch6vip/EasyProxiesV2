@@ -2,6 +2,7 @@
 
 export interface NodeInfo {
   tag: string
+  config_id?: number
   name: string
   uri: string
   mode: string
@@ -34,6 +35,8 @@ export interface NodeSnapshot extends NodeInfo {
   initial_check_done: boolean
   total_upload: number
   total_download: number
+  upload_speed: number
+  download_speed: number
   timeline?: TimelineEvent[]
 }
 
@@ -320,6 +323,7 @@ export type ProbeSSEEvent = ProbeSSEStart | ProbeSSEProgress | ProbeSSEComplete
 
 export interface TrafficStreamNode {
   tag: string
+  config_id?: number
   upload_speed: number
   download_speed: number
   total_upload: number
