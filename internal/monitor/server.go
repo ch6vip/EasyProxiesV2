@@ -163,6 +163,12 @@ type Server struct {
 	// Lifecycle
 	done chan struct{} // closed on Shutdown to stop background goroutines
 
+	// A single sampler feeds every traffic SSE client. This avoids scanning all
+	// nodes once per client and keeps slow clients from blocking fresh updates.
+	trafficMu          sync.RWMutex
+	trafficLatest      TrafficSummary
+	trafficSubscribers map[chan TrafficSummary]struct{}
+
 	subRefresher SubscriptionRefresher
 	nodeMgr      NodeManager
 }
@@ -183,17 +189,20 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		mgr:        mgr,
-		logger:     logger,
-		sessions:   make(map[string]*Session),
-		sessionTTL: 24 * time.Hour,
-		probeSem:   semaphore.NewWeighted(maxConcurrentProbes),
-		done:       make(chan struct{}),
+		cfg:                cfg,
+		mgr:                mgr,
+		logger:             logger,
+		sessions:           make(map[string]*Session),
+		sessionTTL:         24 * time.Hour,
+		probeSem:           semaphore.NewWeighted(maxConcurrentProbes),
+		done:               make(chan struct{}),
+		trafficLatest:      mgr.TrafficSummary(true),
+		trafficSubscribers: make(map[chan TrafficSummary]struct{}),
 	}
 
-	// Start session cleanup goroutine
+	// Start shared background services.
 	go s.cleanupExpiredSessions()
+	go s.runTrafficBroadcaster()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth", s.handleAuth)
@@ -1048,6 +1057,59 @@ func (s *Server) handleProbeAll(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 }
 
+func (s *Server) runTrafficBroadcaster() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			s.publishTrafficSnapshot(s.mgr.TrafficSummary(true))
+		}
+	}
+}
+
+func (s *Server) publishTrafficSnapshot(summary TrafficSummary) {
+	s.trafficMu.Lock()
+	s.trafficLatest = summary
+	for subscriber := range s.trafficSubscribers {
+		select {
+		case subscriber <- summary:
+		default:
+			// Only the newest sample matters for a dashboard. Drop the queued
+			// sample rather than letting a slow browser stall every subscriber.
+			select {
+			case <-subscriber:
+			default:
+			}
+			select {
+			case subscriber <- summary:
+			default:
+			}
+		}
+	}
+	s.trafficMu.Unlock()
+}
+
+func (s *Server) subscribeTraffic() (<-chan TrafficSummary, func()) {
+	updates := make(chan TrafficSummary, 1)
+	s.trafficMu.Lock()
+	s.trafficSubscribers[updates] = struct{}{}
+	updates <- s.trafficLatest
+	s.trafficMu.Unlock()
+
+	var once sync.Once
+	return updates, func() {
+		once.Do(func() {
+			s.trafficMu.Lock()
+			delete(s.trafficSubscribers, updates)
+			s.trafficMu.Unlock()
+		})
+	}
+}
+
 func (s *Server) handleTrafficStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1055,8 +1117,9 @@ func (s *Server) handleTrafficStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1064,7 +1127,17 @@ func (s *Server) handleTrafficStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	send := func(payload map[string]any) bool {
+	send := func(summary TrafficSummary) bool {
+		payload := map[string]any{
+			"type":           "traffic",
+			"node_count":     summary.NodeCount,
+			"total_upload":   summary.TotalUpload,
+			"total_download": summary.TotalDownload,
+			"upload_speed":   summary.UploadSpeed,
+			"download_speed": summary.DownloadSpeed,
+			"sampled_at":     summary.SampledAt,
+			"nodes":          summary.Nodes,
+		}
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return false
@@ -1076,23 +1149,16 @@ func (s *Server) handleTrafficStream(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	// Initial snapshot
-	initial := s.mgr.TrafficSummary(true)
-	if !send(map[string]any{
-		"type":           "traffic",
-		"node_count":     initial.NodeCount,
-		"total_upload":   initial.TotalUpload,
-		"total_download": initial.TotalDownload,
-		"upload_speed":   initial.UploadSpeed,
-		"download_speed": initial.DownloadSpeed,
-		"sampled_at":     initial.SampledAt,
-		"nodes":          initial.Nodes,
-	}) {
+	updates, unsubscribe := s.subscribeTraffic()
+	defer unsubscribe()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	if _, err := io.WriteString(w, "retry: 1000\n\n"); err != nil {
 		return
 	}
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	flusher.Flush()
 
 	for {
 		select {
@@ -1100,21 +1166,15 @@ func (s *Server) handleTrafficStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-s.done:
 			return
-		case <-ticker.C:
-			summary := s.mgr.TrafficSummary(true)
-			ok := send(map[string]any{
-				"type":           "traffic",
-				"node_count":     summary.NodeCount,
-				"total_upload":   summary.TotalUpload,
-				"total_download": summary.TotalDownload,
-				"upload_speed":   summary.UploadSpeed,
-				"download_speed": summary.DownloadSpeed,
-				"sampled_at":     summary.SampledAt,
-				"nodes":          summary.Nodes,
-			})
-			if !ok {
+		case summary := <-updates:
+			if !send(summary) {
 				return
 			}
+		case <-heartbeat.C:
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }

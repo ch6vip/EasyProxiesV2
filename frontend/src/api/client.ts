@@ -236,7 +236,12 @@ export function streamTraffic(
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
+        if (done) {
+          if (!controller.signal.aborted) {
+            onError?.(new Error('实时流连接已断开'))
+          }
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')

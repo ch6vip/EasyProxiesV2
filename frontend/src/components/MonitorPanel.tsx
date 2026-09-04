@@ -16,15 +16,55 @@ function latencyColor(ms: number): string {
   return 'text-error'
 }
 
-type AutoRefreshInterval = 0 | 5 | 10 | 30 | 60
+type AutoRefreshInterval = 0 | 15 | 30 | 60
+
+function mergeTrafficEvent(current: NodesResponse | null, event: TrafficStreamEvent): NodesResponse | null {
+  if (!current) return current
+
+  const realtimeNodes = new Map(event.nodes.map((node) => [node.tag, node]))
+  const nodes = current.nodes.map((node) => {
+    const realtime = realtimeNodes.get(node.tag)
+    if (!realtime) return node
+
+    return {
+      ...node,
+      total_upload: realtime.total_upload,
+      total_download: realtime.total_download,
+      active_connections: realtime.active_connections,
+      failure_count: realtime.failure_count,
+      success_count: realtime.success_count,
+      blacklisted: realtime.blacklisted,
+      blacklisted_until: realtime.blacklisted_until,
+      last_error: realtime.last_error,
+      last_failure: realtime.last_failure,
+      last_success: realtime.last_success,
+      last_latency_ms: realtime.last_latency_ms,
+      available: realtime.available,
+      initial_check_done: realtime.initial_check_done,
+    }
+  })
+
+  return {
+    ...current,
+    nodes,
+    total_nodes: event.node_count,
+    total_upload: event.total_upload,
+    total_download: event.total_download,
+    upload_speed: event.upload_speed,
+    download_speed: event.download_speed,
+    traffic_sampled: event.sampled_at,
+  }
+}
 
 export default function MonitorPanel() {
   const [data, setData] = useState<NodesResponse | null>(null)
   const [configData, setConfigData] = useState<ConfigNodesResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [autoRefresh, setAutoRefresh] = useState<AutoRefreshInterval>(5)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [autoRefresh, setAutoRefresh] = useState<AutoRefreshInterval>(30)
+  const monitorLoadRef = useRef<Promise<void> | null>(null)
+  const configLoadRef = useRef<Promise<void> | null>(null)
+  const knownNodeTagsRef = useRef<Set<string>>(new Set())
   const trafficAbortRef = useRef<AbortController | null>(null)
   const [trafficRealtime, setTrafficRealtime] = useState<{
     connected: boolean
@@ -38,102 +78,206 @@ export default function MonitorPanel() {
     sampledAt: '',
   })
 
-  const loadData = useCallback(async () => {
-    try {
-      setError('')
-      const [monitorRes, configRes] = await Promise.all([
-        fetchNodes(),
-        fetchConfigNodes().catch(() => null),
-      ])
+  const loadMonitorData = useCallback(async () => {
+    if (monitorLoadRef.current) return monitorLoadRef.current
 
-      setData(monitorRes)
-      if (configRes) setConfigData(configRes)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败')
+    const request = (async () => {
+      try {
+        setError('')
+        const response = await fetchNodes()
+        knownNodeTagsRef.current = new Set(response.nodes.map((node) => node.tag))
+        setData(response)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '加载失败')
+      } finally {
+        setLoading(false)
+      }
+    })()
+
+    monitorLoadRef.current = request
+    try {
+      await request
     } finally {
-      setLoading(false)
+      if (monitorLoadRef.current === request) {
+        monitorLoadRef.current = null
+      }
+    }
+  }, [])
+
+  const loadConfigData = useCallback(async () => {
+    if (configLoadRef.current) return configLoadRef.current
+
+    const request = (async () => {
+      try {
+        setConfigData(await fetchConfigNodes())
+      } catch {
+        // Runtime monitoring remains useful even if configuration metadata fails.
+      }
+    })()
+
+    configLoadRef.current = request
+    try {
+      await request
+    } finally {
+      if (configLoadRef.current === request) {
+        configLoadRef.current = null
+      }
     }
   }, [])
 
   useEffect(() => {
-    const initialLoad = setTimeout(loadData, 0)
+    const initialLoad = setTimeout(() => {
+      void Promise.all([loadMonitorData(), loadConfigData()])
+    }, 0)
     return () => clearTimeout(initialLoad)
-  }, [loadData])
+  }, [loadConfigData, loadMonitorData])
 
-  // Auto-refresh timer
+  // Full snapshots are only a fallback/calibration path. Live metrics arrive
+  // through SSE, so a slower non-overlapping refresh is enough.
   useEffect(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-    if (autoRefresh > 0) {
-      timerRef.current = setInterval(() => {
-        loadData()
+    if (autoRefresh === 0) return
+
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        if (!stopped && document.visibilityState === 'visible') {
+          await loadMonitorData()
+        }
+        if (!stopped) schedule()
       }, autoRefresh * 1000)
     }
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadMonitorData()
       }
     }
-  }, [autoRefresh, loadData])
+
+    schedule()
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
+  }, [autoRefresh, loadMonitorData])
 
   const handleRefresh = async () => {
     setLoading(true)
-    await loadData()
+    await Promise.all([loadMonitorData(), loadConfigData()])
   }
 
-  // Real-time speed stream (SSE): reconnect automatically on disconnect.
+  // Real-time stream: merge aggregate and per-node metrics, detect stale
+  // connections, and reconnect with bounded exponential backoff.
   useEffect(() => {
     let stopped = false
+    let retryAttempt = 0
     let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let watchdogTimer: ReturnType<typeof setTimeout> | null = null
+
+    const clearWatchdog = () => {
+      if (watchdogTimer) {
+        clearTimeout(watchdogTimer)
+        watchdogTimer = null
+      }
+    }
+
+    const scheduleReconnect = () => {
+      if (stopped || document.visibilityState !== 'visible' || retryTimer) return
+      setTrafficRealtime((prev) => ({ ...prev, connected: false }))
+      const baseDelay = Math.min(30_000, 1000 * (2 ** retryAttempt))
+      const delay = baseDelay + Math.floor(Math.random() * 500)
+      retryAttempt = Math.min(retryAttempt + 1, 5)
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        connect()
+      }, delay)
+    }
+
+    const armWatchdog = () => {
+      clearWatchdog()
+      watchdogTimer = setTimeout(() => {
+        if (stopped) return
+        trafficAbortRef.current?.abort()
+        trafficAbortRef.current = null
+        scheduleReconnect()
+      }, 10_000)
+    }
 
     const connect = () => {
-      if (stopped) return
+      if (stopped || document.visibilityState !== 'visible') return
 
-      if (trafficAbortRef.current) {
-        trafficAbortRef.current.abort()
-        trafficAbortRef.current = null
-      }
-
-      trafficAbortRef.current = streamTraffic(
+      trafficAbortRef.current?.abort()
+      const controller = streamTraffic(
         (event: TrafficStreamEvent) => {
+          if (stopped || trafficAbortRef.current !== controller) return
+          retryAttempt = 0
+          armWatchdog()
           setTrafficRealtime({
             connected: true,
             uploadSpeed: event.upload_speed || 0,
             downloadSpeed: event.download_speed || 0,
             sampledAt: event.sampled_at || '',
           })
-        },
-        () => {
-          setTrafficRealtime((prev) => ({ ...prev, connected: false }))
-          if (!stopped) {
-            retryTimer = setTimeout(connect, 2000)
+          setData((current) => mergeTrafficEvent(current, event))
+
+          const knownTags = knownNodeTagsRef.current
+          const topologyChanged = event.node_count !== knownTags.size
+            || event.nodes.some((node) => !knownTags.has(node.tag))
+          if (topologyChanged) {
+            void Promise.all([loadMonitorData(), loadConfigData()])
           }
         },
+        () => {
+          if (trafficAbortRef.current === controller) {
+            trafficAbortRef.current = null
+          }
+          clearWatchdog()
+          scheduleReconnect()
+        },
       )
+      trafficAbortRef.current = controller
+      armWatchdog()
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (retryTimer) {
+          clearTimeout(retryTimer)
+          retryTimer = null
+        }
+        clearWatchdog()
+        trafficAbortRef.current?.abort()
+        trafficAbortRef.current = null
+        setTrafficRealtime((prev) => ({ ...prev, connected: false }))
+      } else {
+        retryAttempt = 0
+        void loadMonitorData()
+        connect()
+      }
     }
 
     connect()
+    document.addEventListener('visibilitychange', handleVisibility)
 
     return () => {
       stopped = true
-      if (retryTimer) {
-        clearTimeout(retryTimer)
-      }
-      if (trafficAbortRef.current) {
-        trafficAbortRef.current.abort()
-        trafficAbortRef.current = null
-      }
+      if (retryTimer) clearTimeout(retryTimer)
+      clearWatchdog()
+      trafficAbortRef.current?.abort()
+      trafficAbortRef.current = null
+      document.removeEventListener('visibilitychange', handleVisibility)
     }
-  }, [])
+  }, [loadConfigData, loadMonitorData])
 
   // ---- Computed stats ----
   const allNodes = useMemo(() => data?.nodes || [], [data])
   const allConfigNodes = useMemo(() => configData?.nodes || [], [configData])
 
   // Config-level counts (includes disabled nodes)
-  const totalConfigNodes = allConfigNodes.length
+  const totalConfigNodes = configData ? allConfigNodes.length : (data?.total_nodes || allNodes.length)
   const disabledNodes = useMemo(
     () => allConfigNodes.filter((n: ConfigNodeConfig) => n.disabled).length,
     [allConfigNodes]
@@ -302,19 +446,19 @@ export default function MonitorPanel() {
               {autoRefresh > 0 ? (
                 <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium text-success whitespace-nowrap">
                   <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse"></div>
-                  <span>自动刷新开启</span>
+                  <span>状态校准开启</span>
                 </div>
               ) : (
-                <span className="hidden sm:inline text-sm font-medium pl-2 whitespace-nowrap text-base-content/70">自动刷新</span>
+                <span className="hidden sm:inline text-sm font-medium pl-2 whitespace-nowrap text-base-content/70">完整校准</span>
               )}
               <select
                 className="select select-sm border-0 focus:outline-none focus:ring-0 bg-transparent min-w-[90px] text-sm"
                 value={autoRefresh}
                 onChange={(e) => setAutoRefresh(Number(e.target.value) as AutoRefreshInterval)}
+                aria-label="完整状态校准间隔"
               >
                 <option value={0}>关闭</option>
-                <option value={5}>每 5 秒</option>
-                <option value={10}>每 10 秒</option>
+                <option value={15}>每 15 秒</option>
                 <option value={30}>每 30 秒</option>
                 <option value={60}>每 60 秒</option>
               </select>
@@ -535,8 +679,9 @@ export default function MonitorPanel() {
             共 {totalConfigNodes} 个节点 ·
             {Object.keys(data.region_stats || {}).length} 个地区 ·
             数据来自运行时监控
-            {autoRefresh > 0 && ` · 每 ${autoRefresh} 秒自动刷新`}
-            {trafficRealtime.connected ? ' · 速度流已连接' : ' · 速度流重连中'}
+            {autoRefresh > 0 && ` · 每 ${autoRefresh} 秒完整校准`}
+            {trafficRealtime.connected ? ' · 实时流已连接' : ' · 实时流重连中'}
+            {trafficRealtime.sampledAt && ` · 更新于 ${new Date(trafficRealtime.sampledAt).toLocaleTimeString()}`}
           </>
         )}
       </div>

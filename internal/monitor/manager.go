@@ -81,11 +81,22 @@ type Snapshot struct {
 }
 
 type NodeTrafficSpeed struct {
-	Tag           string `json:"tag"`
-	UploadSpeed   int64  `json:"upload_speed"`   // bytes/sec
-	DownloadSpeed int64  `json:"download_speed"` // bytes/sec
-	TotalUpload   int64  `json:"total_upload"`
-	TotalDownload int64  `json:"total_download"`
+	Tag               string    `json:"tag"`
+	UploadSpeed       int64     `json:"upload_speed"`   // bytes/sec
+	DownloadSpeed     int64     `json:"download_speed"` // bytes/sec
+	TotalUpload       int64     `json:"total_upload"`
+	TotalDownload     int64     `json:"total_download"`
+	ActiveConnections int32     `json:"active_connections"`
+	FailureCount      int       `json:"failure_count"`
+	SuccessCount      int64     `json:"success_count"`
+	Blacklisted       bool      `json:"blacklisted"`
+	BlacklistedUntil  time.Time `json:"blacklisted_until"`
+	LastError         string    `json:"last_error,omitempty"`
+	LastFailure       time.Time `json:"last_failure,omitempty"`
+	LastSuccess       time.Time `json:"last_success,omitempty"`
+	LastLatencyMs     int64     `json:"last_latency_ms"`
+	Available         bool      `json:"available"`
+	InitialCheckDone  bool      `json:"initial_check_done"`
 }
 
 type TrafficSummary struct {
@@ -605,6 +616,31 @@ func (m *Manager) TrafficSummary(includeNodes bool) TrafficSummary {
 		upSpeed := e.uploadSpeed
 		downSpeed := e.downloadSpeed
 		tag := e.info.Tag
+		latencyMs := int64(-1)
+		if e.lastProbe > 0 {
+			latencyMs = e.lastProbe.Milliseconds()
+			if latencyMs == 0 {
+				latencyMs = 1
+			}
+		}
+		node := NodeTrafficSpeed{
+			Tag:               tag,
+			UploadSpeed:       upSpeed,
+			DownloadSpeed:     downSpeed,
+			TotalUpload:       totalUp,
+			TotalDownload:     totalDown,
+			ActiveConnections: e.active.Load(),
+			FailureCount:      e.failure,
+			SuccessCount:      e.success,
+			Blacklisted:       e.blacklist,
+			BlacklistedUntil:  e.until,
+			LastError:         e.lastError,
+			LastFailure:       e.lastFail,
+			LastSuccess:       e.lastOK,
+			LastLatencyMs:     latencyMs,
+			Available:         e.available,
+			InitialCheckDone:  e.initialCheckDone,
+		}
 		e.mu.RUnlock()
 
 		summary.TotalUpload += totalUp
@@ -613,13 +649,7 @@ func (m *Manager) TrafficSummary(includeNodes bool) TrafficSummary {
 		summary.DownloadSpeed += downSpeed
 
 		if includeNodes {
-			summary.Nodes = append(summary.Nodes, NodeTrafficSpeed{
-				Tag:           tag,
-				UploadSpeed:   upSpeed,
-				DownloadSpeed: downSpeed,
-				TotalUpload:   totalUp,
-				TotalDownload: totalDown,
-			})
+			summary.Nodes = append(summary.Nodes, node)
 		}
 	}
 

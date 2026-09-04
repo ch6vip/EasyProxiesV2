@@ -324,6 +324,17 @@ export interface TrafficStreamNode {
   download_speed: number
   total_upload: number
   total_download: number
+  active_connections: number
+  failure_count: number
+  success_count: number
+  blacklisted: boolean
+  blacklisted_until: string
+  last_error?: string
+  last_failure?: string
+  last_success?: string
+  last_latency_ms: number
+  available: boolean
+  initial_check_done: boolean
 }
 
 export interface TrafficStreamEvent {
