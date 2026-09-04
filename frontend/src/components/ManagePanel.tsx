@@ -836,7 +836,7 @@ export default function ManagePanel() {
       </div>
 
       {/* Batch action bar */}
-      <div className={`overflow-hidden transition-all duration-300 ${visibleSelectedNames.length > 0 ? 'max-h-48 opacity-100 sm:max-h-24' : 'max-h-0 opacity-0'}`}>
+      <div>
         <div className="flex flex-col gap-3 px-5 py-4 bg-primary/5 border border-primary/20 rounded-2xl shadow-inner relative">
           <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-primary rounded-l-2xl"></div>
           <div className="flex items-center gap-4 flex-wrap">
@@ -847,7 +847,7 @@ export default function ManagePanel() {
               <button
                 className="btn btn-sm btn-primary shadow-sm gap-1.5"
                 onClick={handleBatchProbe}
-                disabled={batchProcessing}
+                disabled={batchProcessing || visibleSelectedNames.length === 0}
                 title="对选中的已启用节点逐个探测"
               >
                 {batchProbeProgress
@@ -858,21 +858,21 @@ export default function ManagePanel() {
               <button
                 className="btn btn-sm btn-success border-none bg-success/15 text-success hover:bg-success hover:text-success-content"
                 onClick={() => handleBatchToggle(true)}
-                disabled={batchProcessing}
+                disabled={batchProcessing || visibleSelectedNames.length === 0}
               >
                 启用
               </button>
               <button
                 className="btn btn-sm btn-warning border-none bg-warning/15 text-warning-content hover:bg-warning hover:text-warning-content"
                 onClick={() => handleBatchToggle(false)}
-                disabled={batchProcessing}
+                disabled={batchProcessing || visibleSelectedNames.length === 0}
               >
                 禁用
               </button>
               <button
                 className="btn btn-sm btn-error border-none bg-error/15 text-error hover:bg-error hover:text-error-content"
                 onClick={() => setBatchDeleteConfirm(true)}
-                disabled={batchProcessing}
+                disabled={batchProcessing || visibleSelectedNames.length === 0}
               >
                 删除
               </button>
@@ -880,7 +880,7 @@ export default function ManagePanel() {
               <button
                 className="btn btn-sm btn-ghost hover:bg-base-300"
                 onClick={() => setSelectedNodes(new Set())}
-                disabled={batchProcessing}
+                disabled={batchProcessing || visibleSelectedNames.length === 0}
               >
                 取消选择
               </button>
