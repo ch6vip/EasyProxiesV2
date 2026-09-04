@@ -641,7 +641,7 @@ func (p *poolOutbound) selectMember(candidates []*memberState) *memberState {
 func (p *poolOutbound) recordFailure(member *memberState, cause error, phase failurePhase, destination string) {
 	class := classifyFailure(cause, phase)
 	if member.shared == nil {
-		p.logger.Warn("proxy ", member.tag, " failure (no shared state, class=", class, "): ", cause)
+		p.logger.Warn("proxy ", member.tag, " failure (no shared state, class=", string(class), "): ", cause)
 		return
 	}
 	result := member.shared.recordFailure(cause, class, p.options, destination)
@@ -649,9 +649,9 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error, phase fai
 		return
 	}
 	if result.triggered {
-		p.logger.Warn("proxy ", member.tag, " cooling down until ", result.nextRetryAt.Format(time.RFC3339), " (class=", class, ", events=", result.events, ", score=", result.score, "): ", cause)
+		p.logger.Warn("proxy ", member.tag, " cooling down until ", result.nextRetryAt.Format(time.RFC3339), " (class=", string(class), ", events=", result.events, ", score=", result.score, "): ", cause)
 	} else {
-		p.logger.Warn("proxy ", member.tag, " failure class=", class, " events=", result.events, " score=", result.score, "/", p.options.FailureThreshold, ": ", cause)
+		p.logger.Warn("proxy ", member.tag, " failure class=", string(class), " events=", result.events, " score=", result.score, "/", p.options.FailureThreshold, ": ", cause)
 	}
 }
 
