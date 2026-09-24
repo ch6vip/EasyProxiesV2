@@ -41,6 +41,53 @@ func TestImportConfiguredSubscriptionsUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestImportConfiguredSubscriptionsPreservesDisabledState(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	url := "https://example.com/disabled"
+	existing := &store.Subscription{Name: "disabled", URL: url, Enabled: false, RefreshIntervalSeconds: 60, RefreshTimeoutSeconds: 10}
+	if err := db.CreateSubscription(context.Background(), existing); err != nil {
+		t.Fatal(err)
+	}
+	mgr := New(&config.Config{Subscriptions: []string{url}}, nil, WithStore(db))
+	defer mgr.Stop()
+
+	if err := mgr.importConfiguredSubscriptions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mgr.Get(context.Background(), existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Fatalf("disabled subscription was re-enabled during import: %+v", got)
+	}
+}
+
+func TestCreatePreservesAutoRefreshSetting(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mgr := New(&config.Config{}, nil, WithStore(db))
+	defer mgr.Stop()
+	sub, err := mgr.Create(context.Background(), store.Subscription{
+		Name: "manual", URL: "https://example.com/manual", Enabled: true, AutoRefreshEnabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.AutoRefreshEnabled {
+		t.Fatalf("explicitly disabled auto refresh was changed during create: %+v", sub)
+	}
+}
+
 func TestRefreshNowKeepsFailedMembershipAndCommitsSuccessfulSubscription(t *testing.T) {
 	var fail bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

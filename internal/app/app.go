@@ -76,8 +76,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 
 	// ── 5. Create and start SubscriptionManager ──
 	// Always created so it can dynamically respond to config changes
-	// (e.g., user enables subscriptions via WebUI). The manager's internal
-	// refresh loop checks config state to decide when to actually refresh.
+	// (e.g., user adds or toggles subscriptions via WebUI). The manager
+	// keeps per-subscription refresh state in the store.
 	subMgr := subscription.New(cfg, boxMgr, subscription.WithStore(dataStore))
 	subMgr.Start()
 	defer subMgr.Stop()

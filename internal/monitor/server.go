@@ -100,6 +100,7 @@ type SubscriptionRefresher interface {
 	Update(ctx context.Context, id int64, subscription store.Subscription) (*store.Subscription, error)
 	Delete(ctx context.Context, id int64) error
 	SetEnabled(ctx context.Context, id int64, enabled bool) error
+	SetAutoRefreshEnabled(ctx context.Context, id int64, enabled bool) error
 	ActivateExclusive(ctx context.Context, id int64) error
 	RefreshOne(ctx context.Context, id int64) error
 	Nodes(ctx context.Context, id int64) ([]store.SubscriptionNode, error)
@@ -637,18 +638,6 @@ func (s *Server) updateAllSettings(ctx context.Context, req allSettingsRequest) 
 	}
 	if s.subRefresher != nil {
 		s.subRefresher.ApplyConfig(c)
-	}
-	if s.store != nil && (old.SubscriptionRefresh.Interval != c.SubscriptionRefresh.Interval || old.SubscriptionRefresh.Timeout != c.SubscriptionRefresh.Timeout) {
-		interval, timeout := 0, 0
-		if old.SubscriptionRefresh.Interval != c.SubscriptionRefresh.Interval {
-			interval = int(c.SubscriptionRefresh.Interval.Seconds())
-		}
-		if old.SubscriptionRefresh.Timeout != c.SubscriptionRefresh.Timeout {
-			timeout = int(c.SubscriptionRefresh.Timeout.Seconds())
-		}
-		if err := s.store.UpdateAllSubscriptionRefreshSettings(ctx, interval, timeout); err != nil {
-			s.logger.Printf("批量更新订阅刷新设置失败: %v", err)
-		}
 	}
 	result := SettingsUpdateResult{Saved: true, NeedReload: plan.NeedReload, NeedRestart: plan.NeedRestart, Applied: plan.Applied, Pending: plan.Pending}
 	if plan.NeedReload && s.nodeMgr != nil {
@@ -1587,6 +1576,19 @@ func (s *Server) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		err = s.subRefresher.SetEnabled(r.Context(), id, *input.Enabled)
+	case "auto-refresh-enabled":
+		if r.Method != http.MethodPatch {
+			writeAPIError(w, http.StatusMethodNotAllowed, "璇锋眰鏂规硶涓嶅厑璁?")
+			return
+		}
+		var input struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := decodeJSON(r, &input); err != nil || input.Enabled == nil {
+			writeAPIError(w, http.StatusBadRequest, "enabled 瀛楁蹇呭～")
+			return
+		}
+		err = s.subRefresher.SetAutoRefreshEnabled(r.Context(), id, *input.Enabled)
 	case "activate":
 		if r.Method != http.MethodPost {
 			writeAPIError(w, http.StatusMethodNotAllowed, "请求方法不允许")

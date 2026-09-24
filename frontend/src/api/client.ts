@@ -449,6 +449,13 @@ export async function toggleSubscription(id: number, enabled: boolean): Promise<
   })
 }
 
+export async function toggleSubscriptionAutoRefresh(id: number, enabled: boolean): Promise<SubscriptionActionResponse> {
+  return request<SubscriptionActionResponse>(`/api/subscriptions/${id}/auto-refresh-enabled`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  })
+}
+
 export async function activateSubscription(id: number): Promise<SubscriptionActionResponse> {
   return request<SubscriptionActionResponse>(`/api/subscriptions/${id}/activate`, { method: 'POST' })
 }

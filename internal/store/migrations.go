@@ -160,6 +160,13 @@ CREATE INDEX idx_subscription_rules_subscription_position
     ON subscription_rules(subscription_id, position);
 `,
 		},
+		{
+			Version:     5,
+			Description: "add per-subscription auto refresh setting",
+			Up: `
+ALTER TABLE subscriptions ADD COLUMN auto_refresh_enabled INTEGER NOT NULL DEFAULT 1;
+`,
+		},
 	}
 }
 

@@ -55,6 +55,7 @@ type Store interface {
 	UpdateSubscription(ctx context.Context, subscription *Subscription) error
 	DeleteSubscription(ctx context.Context, id int64) error
 	SetSubscriptionEnabled(ctx context.Context, id int64, enabled bool) error
+	SetSubscriptionAutoRefreshEnabled(ctx context.Context, id int64, enabled bool) error
 	UpdateAllSubscriptionRefreshSettings(ctx context.Context, intervalSeconds, timeoutSeconds int) error
 	ActivateSubscriptionExclusive(ctx context.Context, id int64) error
 	ListSubscriptionNodes(ctx context.Context, subscriptionID int64) ([]SubscriptionNode, error)
@@ -181,6 +182,7 @@ type Subscription struct {
 	Name                   string    `json:"name"`
 	URL                    string    `json:"url"`
 	Enabled                bool      `json:"enabled"`
+	AutoRefreshEnabled     bool      `json:"auto_refresh_enabled"`
 	RefreshIntervalSeconds int       `json:"refresh_interval_seconds"`
 	RefreshTimeoutSeconds  int       `json:"refresh_timeout_seconds"`
 	SortOrder              int       `json:"sort_order"`

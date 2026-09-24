@@ -87,7 +87,7 @@ func (m *Manager) refreshInitialSnapshots() {
 	}
 	needsRefresh := false
 	for _, sub := range subs {
-		if sub.Enabled && sub.LastSuccess.IsZero() {
+		if sub.Enabled && sub.AutoRefreshEnabled && sub.LastSuccess.IsZero() {
 			needsRefresh = true
 			break
 		}
@@ -140,17 +140,11 @@ func (m *Manager) importConfiguredSubscriptions(ctx context.Context) error {
 			return err
 		}
 		if existing != nil {
-			// Older v3 builds incorrectly tied subscription enabled state to the
-			// global auto-refresh switch. Repair only records that have never
-			// produced a snapshot; established user choices remain untouched.
-			if !existing.Enabled && existing.LastSuccess.IsZero() && existing.NodeCount == 0 {
-				if err := m.store.SetSubscriptionEnabled(ctx, existing.ID, true); err != nil {
-					return err
-				}
-			}
+			// Keep the persisted enabled state. A disabled subscription may be
+			// intentionally configured and must not be re-enabled on restart.
 			continue
 		}
-		sub := &store.Subscription{Name: fmt.Sprintf("订阅 %d", i+1), URL: rawURL, Enabled: true,
+		sub := &store.Subscription{Name: fmt.Sprintf("订阅 %d", i+1), URL: rawURL, Enabled: true, AutoRefreshEnabled: true,
 			RefreshIntervalSeconds: interval, RefreshTimeoutSeconds: timeout, SortOrder: i}
 		if err := validateSubscription(sub); err != nil {
 			return fmt.Errorf("导入订阅 %d: %w", i+1, err)
@@ -203,6 +197,7 @@ func (m *Manager) Update(ctx context.Context, id int64, input store.Subscription
 		return nil, err
 	}
 	current.Name, current.URL, current.Enabled = input.Name, input.URL, input.Enabled
+	current.AutoRefreshEnabled = input.AutoRefreshEnabled
 	current.RefreshIntervalSeconds = input.RefreshIntervalSeconds
 	current.RefreshTimeoutSeconds = input.RefreshTimeoutSeconds
 	current.SortOrder = input.SortOrder
@@ -237,6 +232,16 @@ func (m *Manager) SetEnabled(ctx context.Context, id int64, enabled bool) error 
 		return err
 	}
 	return m.reconcileRuntime(ctx)
+}
+
+func (m *Manager) SetAutoRefreshEnabled(ctx context.Context, id int64, enabled bool) error {
+	if _, err := m.Get(ctx, id); err != nil {
+		return err
+	}
+	if err := m.store.SetSubscriptionAutoRefreshEnabled(ctx, id, enabled); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) ActivateExclusive(ctx context.Context, id int64) error {
@@ -325,7 +330,7 @@ func (m *Manager) refreshDue(ctx context.Context, dueOnly bool) error {
 	var errs []error
 	for i := range subs {
 		sub := &subs[i]
-		if !sub.Enabled {
+		if !sub.Enabled || (dueOnly && !sub.AutoRefreshEnabled) {
 			continue
 		}
 		if dueOnly && !sub.LastAttempt.IsZero() && now.Before(sub.LastAttempt.Add(time.Duration(sub.RefreshIntervalSeconds)*time.Second)) {
@@ -507,10 +512,7 @@ func (m *Manager) refreshLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			m.mu.RLock()
-			enabled := m.baseCfg.SubscriptionRefresh.Enabled
-			m.mu.RUnlock()
-			if enabled && m.refreshMu.TryLock() {
+			if m.refreshMu.TryLock() {
 				_ = m.refreshDue(m.ctx, true)
 				m.refreshMu.Unlock()
 			}
@@ -521,16 +523,16 @@ func (m *Manager) refreshLoop() {
 func (m *Manager) Status() monitor.SubscriptionStatus {
 	m.mu.RLock()
 	status := m.status
-	globalEnabled := m.baseCfg.SubscriptionRefresh.Enabled
 	m.mu.RUnlock()
 	if subs, err := m.List(m.ctx); err == nil {
 		status.HasSubscriptions = len(subs) > 0
-		status.Enabled = globalEnabled
+		status.Enabled = false
 		var next time.Time
 		for _, sub := range subs {
-			if !sub.Enabled {
+			if !sub.Enabled || !sub.AutoRefreshEnabled {
 				continue
 			}
+			status.Enabled = true
 			due := sub.LastAttempt.Add(time.Duration(sub.RefreshIntervalSeconds) * time.Second)
 			if sub.LastAttempt.IsZero() {
 				due = time.Now()
@@ -548,7 +550,7 @@ func (m *Manager) OnConfigUpdate(cfg *config.Config) {
 	m.ApplyConfig(cfg)
 }
 
-// ApplyConfig publishes subscription defaults and enabled state immediately.
+// ApplyConfig publishes subscription defaults immediately.
 func (m *Manager) ApplyConfig(cfg *config.Config) {
 	if cfg == nil {
 		return

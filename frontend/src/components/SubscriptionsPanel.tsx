@@ -9,6 +9,7 @@ import {
   refreshOneSubscription,
   refreshSubscription,
   toggleSubscription,
+  toggleSubscriptionAutoRefresh,
   updateSubscription,
 } from '../api/client'
 import { controlClass, PageContent, PageHeader, PageLayout, surfaceClass } from './ui/PageLayout'
@@ -54,8 +55,9 @@ export default function SubscriptionsPanel() {
 
   const payloadFor = (name: string, url: string, current?: Subscription): SubscriptionPayload => ({
     name: name.trim(), url: url.trim(), enabled: current?.enabled ?? true,
-    refresh_interval_seconds: current?.refresh_interval_seconds ?? 0,
-    refresh_timeout_seconds: current?.refresh_timeout_seconds ?? 0,
+    auto_refresh_enabled: current?.auto_refresh_enabled ?? true,
+    refresh_interval_seconds: current?.refresh_interval_seconds ?? 3600,
+    refresh_timeout_seconds: current?.refresh_timeout_seconds ?? 30,
     sort_order: current?.sort_order ?? subscriptions.length,
   })
 
@@ -152,7 +154,7 @@ export default function SubscriptionsPanel() {
               ) : (
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
                   <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong>{subscription.name}</strong><span className={`badge badge-sm ${subscription.enabled ? 'badge-success' : 'badge-ghost'}`}>{subscription.enabled ? '已启用' : '已禁用'}</span><span className="badge badge-outline badge-sm">{subscription.node_count} 节点</span>{subscription.rule_count > 0 && <span className="badge badge-primary badge-outline badge-sm">{subscription.rule_count} 规则</span>}</div><code className="mt-1 block break-all text-xs text-base-content/55">{subscription.url}</code><div className="mt-2 flex flex-wrap gap-x-4 text-xs text-base-content/55"><span>最近成功：{subscription.last_success && !subscription.last_success.startsWith('0001-') ? new Date(subscription.last_success).toLocaleString() : '尚未成功'}</span>{subscription.last_error && <span className="break-all text-error">错误：{subscription.last_error}</span>}</div></div>
-                  <div className="flex flex-wrap gap-2 lg:justify-end"><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => startEditing(subscription)}>编辑</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runAction(`toggle-${subscription.id}`, () => toggleSubscription(subscription.id, !subscription.enabled), subscription.enabled ? '订阅已禁用' : '订阅已启用')}>{action === `toggle-${subscription.id}` && <span className="loading loading-spinner loading-xs" />}{subscription.enabled ? '禁用' : '启用'}</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runAction(`refresh-${subscription.id}`, () => refreshOneSubscription(subscription.id), `${subscription.name} 刷新完成`)}>{action === `refresh-${subscription.id}` && <span className="loading loading-spinner loading-xs" />}刷新</button><button className="btn btn-ghost btn-sm text-primary" disabled={busy || (subscription.enabled && enabledCount === 1)} onClick={() => void runAction(`activate-${subscription.id}`, () => activateSubscription(subscription.id), `已独占启用 ${subscription.name}`)}>独占启用</button><button className="btn btn-ghost btn-sm text-error" disabled={busy} onClick={() => setDeleteTarget(subscription)}>删除</button></div>
+                  <div className="flex flex-wrap gap-2 lg:justify-end"><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => startEditing(subscription)}>编辑</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runAction(`toggle-${subscription.id}`, () => toggleSubscription(subscription.id, !subscription.enabled), subscription.enabled ? '订阅已禁用' : '订阅已启用')}>{action === `toggle-${subscription.id}` && <span className="loading loading-spinner loading-xs" />}{subscription.enabled ? '禁用' : '启用'}</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runAction(`auto-${subscription.id}`, () => toggleSubscriptionAutoRefresh(subscription.id, !subscription.auto_refresh_enabled), subscription.auto_refresh_enabled ? '自动刷新已停止' : '自动刷新已启用')}>{action === `auto-${subscription.id}` && <span className="loading loading-spinner loading-xs" />}{subscription.auto_refresh_enabled ? '停止自动刷新' : '启用自动刷新'}</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runAction(`refresh-${subscription.id}`, () => refreshOneSubscription(subscription.id), `${subscription.name} 刷新完成`)}>{action === `refresh-${subscription.id}` && <span className="loading loading-spinner loading-xs" />}刷新</button><button className="btn btn-ghost btn-sm text-primary" disabled={busy || (subscription.enabled && enabledCount === 1)} onClick={() => void runAction(`activate-${subscription.id}`, () => activateSubscription(subscription.id), `已独占启用 ${subscription.name}`)}>独占启用</button><button className="btn btn-ghost btn-sm text-error" disabled={busy} onClick={() => setDeleteTarget(subscription)}>删除</button></div>
                 </div>
               )}
               {deleteTarget?.id === subscription.id && <div className="alert alert-warning mt-3 flex-col items-start sm:flex-row sm:items-center"><span>确认删除订阅“{subscription.name}”？此操作会同步更新运行时节点。</span><div className="flex gap-2 sm:ml-auto"><button className="btn btn-error btn-sm" disabled={busy} onClick={() => void runAction(`delete-${subscription.id}`, () => deleteSubscription(subscription.id), '订阅已删除').then((deleted) => deleted && setDeleteTarget(null))}>确认删除</button><button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setDeleteTarget(null)}>取消</button></div></div>}

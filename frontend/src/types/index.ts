@@ -228,6 +228,7 @@ export interface Subscription {
   name: string
   url: string
   enabled: boolean
+  auto_refresh_enabled: boolean
   refresh_interval_seconds: number
   refresh_timeout_seconds: number
   sort_order: number
@@ -246,6 +247,7 @@ export interface SubscriptionPayload {
   name: string
   url: string
   enabled: boolean
+  auto_refresh_enabled: boolean
   refresh_interval_seconds: number
   refresh_timeout_seconds: number
   sort_order: number

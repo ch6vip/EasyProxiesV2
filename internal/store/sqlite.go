@@ -363,7 +363,7 @@ func (s *sqliteStore) CountNodes(ctx context.Context, filter NodeFilter) (int64,
 // ===================== Subscriptions =====================
 
 const subscriptionColumns = `id, name, url, enabled, refresh_interval_seconds,
-	refresh_timeout_seconds, sort_order, last_attempt, last_success, last_error,
+	refresh_timeout_seconds, auto_refresh_enabled, sort_order, last_attempt, last_success, last_error,
 	node_count, rule_count, etag, last_modified, created_at, updated_at`
 
 func (s *sqliteStore) ListSubscriptions(ctx context.Context) ([]Subscription, error) {
@@ -394,11 +394,11 @@ func (s *sqliteStore) GetSubscriptionByURL(ctx context.Context, url string) (*Su
 func (s *sqliteStore) CreateSubscription(ctx context.Context, subscription *Subscription) error {
 	now := time.Now().UTC()
 	result, err := s.conn().ExecContext(ctx, `INSERT INTO subscriptions
-		(name, url, enabled, refresh_interval_seconds, refresh_timeout_seconds, sort_order,
+		(name, url, enabled, refresh_interval_seconds, refresh_timeout_seconds, auto_refresh_enabled, sort_order,
 		 last_attempt, last_success, last_error, node_count, rule_count, etag, last_modified, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		subscription.Name, subscription.URL, boolToInt(subscription.Enabled),
-		subscription.RefreshIntervalSeconds, subscription.RefreshTimeoutSeconds, subscription.SortOrder,
+		subscription.RefreshIntervalSeconds, subscription.RefreshTimeoutSeconds, boolToInt(subscription.AutoRefreshEnabled), subscription.SortOrder,
 		formatTime(subscription.LastAttempt), formatTime(subscription.LastSuccess), subscription.LastError,
 		subscription.NodeCount, subscription.RuleCount, subscription.ETag, subscription.LastModified, formatTime(now), formatTime(now))
 	if err != nil {
@@ -414,10 +414,10 @@ func (s *sqliteStore) CreateSubscription(ctx context.Context, subscription *Subs
 
 func (s *sqliteStore) UpdateSubscription(ctx context.Context, subscription *Subscription) error {
 	result, err := s.conn().ExecContext(ctx, `UPDATE subscriptions SET name=?, url=?, enabled=?,
-		refresh_interval_seconds=?, refresh_timeout_seconds=?, sort_order=?, last_attempt=?,
+		refresh_interval_seconds=?, refresh_timeout_seconds=?, auto_refresh_enabled=?, sort_order=?, last_attempt=?,
 		last_success=?, last_error=?, node_count=?, rule_count=?, etag=?, last_modified=?, updated_at=? WHERE id=?`,
 		subscription.Name, subscription.URL, boolToInt(subscription.Enabled), subscription.RefreshIntervalSeconds,
-		subscription.RefreshTimeoutSeconds, subscription.SortOrder, formatTime(subscription.LastAttempt),
+		subscription.RefreshTimeoutSeconds, boolToInt(subscription.AutoRefreshEnabled), subscription.SortOrder, formatTime(subscription.LastAttempt),
 		formatTime(subscription.LastSuccess), subscription.LastError, subscription.NodeCount, subscription.RuleCount, subscription.ETag,
 		subscription.LastModified, formatTime(time.Now().UTC()), subscription.ID)
 	if err != nil {
@@ -462,6 +462,15 @@ func (s *sqliteStore) UpdateAllSubscriptionRefreshSettings(ctx context.Context, 
 		return fmt.Errorf("update subscription refresh settings: %w", err)
 	}
 	return nil
+}
+
+func (s *sqliteStore) SetSubscriptionAutoRefreshEnabled(ctx context.Context, id int64, enabled bool) error {
+	result, err := s.conn().ExecContext(ctx, "UPDATE subscriptions SET auto_refresh_enabled=?, updated_at=? WHERE id=?",
+		boolToInt(enabled), formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("set subscription %d auto refresh enabled: %w", id, err)
+	}
+	return requireAffected(result, fmt.Sprintf("subscription %d not found", id))
 }
 
 func (s *sqliteStore) ActivateSubscriptionExclusive(ctx context.Context, id int64) error {
@@ -539,8 +548,9 @@ func (s *sqliteStore) ListEffectiveSubscriptionRules(ctx context.Context, prefer
 			return nil, fmt.Errorf("select routing subscription %d: %w", subscriptionID, err)
 		}
 	} else {
-		err := s.conn().QueryRowContext(ctx, `SELECT id FROM subscriptions
-			WHERE enabled=1 AND rule_count>0 ORDER BY sort_order, id LIMIT 1`).Scan(&subscriptionID)
+		err := s.conn().QueryRowContext(ctx, `SELECT s.id FROM subscriptions s
+			WHERE s.enabled=1 AND EXISTS (SELECT 1 FROM subscription_rules r WHERE r.subscription_id=s.id)
+			ORDER BY s.sort_order, s.id LIMIT 1`).Scan(&subscriptionID)
 		if err == sql.ErrNoRows {
 			return []SubscriptionRule{}, nil
 		}
@@ -1113,13 +1123,14 @@ func scanSubscriptionRow(row *sql.Row) (*Subscription, error) {
 
 func scanSubscription(row scanner) (Subscription, error) {
 	var subscription Subscription
-	var enabled int
+	var enabled, autoRefreshEnabled int
 	var lastAttempt, lastSuccess, createdAt, updatedAt string
 	err := row.Scan(&subscription.ID, &subscription.Name, &subscription.URL, &enabled,
-		&subscription.RefreshIntervalSeconds, &subscription.RefreshTimeoutSeconds, &subscription.SortOrder,
+		&subscription.RefreshIntervalSeconds, &subscription.RefreshTimeoutSeconds, &autoRefreshEnabled, &subscription.SortOrder,
 		&lastAttempt, &lastSuccess, &subscription.LastError, &subscription.NodeCount, &subscription.RuleCount, &subscription.ETag,
 		&subscription.LastModified, &createdAt, &updatedAt)
 	subscription.Enabled = enabled != 0
+	subscription.AutoRefreshEnabled = autoRefreshEnabled != 0
 	subscription.LastAttempt, subscription.LastSuccess = parseTime(lastAttempt), parseTime(lastSuccess)
 	subscription.CreatedAt, subscription.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return subscription, err
